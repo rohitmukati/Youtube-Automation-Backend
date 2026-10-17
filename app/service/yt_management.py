@@ -1,19 +1,24 @@
+import asyncio
 import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+import requests
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.exceptions import (
     AccountDisabledError,
+    AppException,
+    ConflictError,
     NotFoundError,
     ValidationError,
 )
@@ -32,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 # OAuth state valid rehta hai sirf 10 minute
 _OAUTH_STATE_TTL_MINUTES = 10
+
+# Access token expire hone se thoda pehle hi refresh kar lo
+_TOKEN_REFRESH_SKEW_SECONDS = 60
+
+_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 
 def _build_flow() -> Flow:
@@ -52,6 +62,7 @@ def _build_flow() -> Flow:
         client_config,
         scopes=settings.google_scopes,
         redirect_uri=settings.google_redirect_uri,
+        autogenerate_code_verifier=False,
     )
     return flow
 
@@ -68,17 +79,25 @@ def _credentials_from_account(account: YouTubeAccount) -> Credentials:
     )
 
 
-async def _fetch_channel_info(credentials: Credentials) -> dict:
+def _expiry_of(credentials: Credentials) -> datetime:
+    if credentials.expiry:
+        return ensure_utc(credentials.expiry)
+    return utc_now() + timedelta(hours=1)
+
+
+def _exchange_code_sync(code: str) -> Credentials:
+    flow = _build_flow()
+    flow.fetch_token(code=code)
+    return flow.credentials
+
+
+def _fetch_channel_info_sync(credentials: Credentials) -> dict:
     """
     YouTube API se channel ki basic info fetch karta hai.
     Returns: {channel_id, channel_title, thumbnail_url}
     """
-    youtube = build("youtube", "v3", credentials=credentials)
-    response = (
-        youtube.channels()
-        .list(part="snippet", mine=True)
-        .execute()
-    )
+    youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
+    response = youtube.channels().list(part="snippet", mine=True).execute()
     items = response.get("items", [])
     if not items:
         raise ValidationError("Is Google account ke saath koi YouTube channel linked nahi hai.")
@@ -95,6 +114,16 @@ async def _fetch_channel_info(credentials: Credentials) -> dict:
         "channel_title": snippet.get("title", "Unknown Channel"),
         "thumbnail_url": thumbnail_url,
     }
+
+
+def _refresh_credentials_sync(credentials: Credentials) -> None:
+    credentials.refresh(Request())
+
+
+def _revoke_token_sync(token: str) -> None:
+    response = requests.post(_REVOKE_URL, params={"token": token}, timeout=5)
+    if response.status_code != 200:
+        logger.warning("Google token revoke returned status %s", response.status_code)
 
 
 class YouTubeManagementService:
@@ -122,6 +151,9 @@ class YouTubeManagementService:
         """
         self._check_google_configured()
 
+        # Purane expire states hata do
+        await yt_crud.cleanup_expired_oauth_states(self._session)
+
         # Ek random state token banao (CSRF protection)
         state_token = secrets.token_urlsafe(32)
 
@@ -138,8 +170,10 @@ class YouTubeManagementService:
         # Google OAuth URL banao
         flow = _build_flow()
         auth_url, _ = flow.authorization_url(
-            access_type="offline",   # Refresh token milega
-            prompt="consent",        # Har baar consent maango (naya refresh token)
+            access_type="offline",  # Refresh token milega
+            # select_account: har baar account chooser dikhao, taaki alag Gmail chuna ja sake
+            # consent: har baar consent maango (naya refresh token)
+            prompt="select_account consent",
             include_granted_scopes="false",
             state=state_token,
         )
@@ -176,35 +210,61 @@ class YouTubeManagementService:
         user_id = state_record.user_id
         nickname = state_record.nickname
 
-        # State use ho gaya, delete karo
+        # State single-use hai: aage kuch fail ho tab bhi dobara use nahi hona chahiye
         await yt_crud.delete_oauth_state(self._session, state_token)
+        await self._session.commit()
 
-        # Google se tokens exchange karo
-        flow = _build_flow()
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
+        try:
+            # Google ke calls blocking hain, isliye thread mein chalate hain
+            credentials = await asyncio.to_thread(_exchange_code_sync, code)
+            channel_info = await asyncio.to_thread(_fetch_channel_info_sync, credentials)
+        except AppException:
+            raise
+        except Exception:
+            logger.exception("Google OAuth callback failed for user %s", user_id)
+            raise ValidationError(
+                "Google account connect nahi ho paaya. Kripya dobara try karo."
+            )
 
-        # YouTube channel info fetch karo
-        channel_info = await _fetch_channel_info(credentials)
         channel_id = channel_info["channel_id"]
+        token_expires_at = _expiry_of(credentials)
+        scopes = " ".join(credentials.scopes or settings.google_scopes)
 
-        # Same channel already connected hai?
         existing = await yt_crud.get_account_by_channel_id(
             self._session, user_id, channel_id
         )
+
+        refresh_token = credentials.refresh_token
+        if not refresh_token and existing is not None:
+            still_valid = (
+                existing.is_active
+                and not existing.needs_reconnect
+                and bool(existing.encrypted_refresh_token)
+            )
+            if still_valid:
+                refresh_token = decrypt_token(existing.encrypted_refresh_token)
+        if not refresh_token:
+            raise ValidationError(
+                "Google ne offline access nahi diya. Google account settings se is app ka "
+                "access hata kar dobara connect karo."
+            )
+
         if existing is not None:
-            # Re-connect = tokens update kar do
+            # Re-connect = tokens, scopes aur channel info sab refresh karo
             logger.info(
                 "Re-connecting existing channel %s for user %s", channel_id, user_id
             )
-            updated = await yt_crud.update_account_tokens(
+            await yt_crud.reconnect_account(
                 self._session,
                 existing,
+                nickname=nickname,
+                channel_title=channel_info["channel_title"],
+                channel_thumbnail_url=channel_info.get("thumbnail_url"),
                 encrypted_access_token=encrypt_token(credentials.token),
-                token_expires_at=credentials.expiry or utc_now() + timedelta(hours=1),
+                encrypted_refresh_token=encrypt_token(refresh_token),
+                token_expires_at=token_expires_at,
+                scopes=scopes,
             )
-            existing.is_active = True
-            existing.nickname = nickname
             await self._session.commit()
             return ConnectSuccessResponse(
                 message=f"'{channel_info['channel_title']}' successfully reconnected!",
@@ -212,20 +272,25 @@ class YouTubeManagementService:
             )
 
         # Naya account save karo
-        token_expires_at = credentials.expiry or utc_now() + timedelta(hours=1)
-        account = await yt_crud.create_youtube_account(
-            self._session,
-            user_id=user_id,
-            nickname=nickname,
-            channel_id=channel_id,
-            channel_title=channel_info["channel_title"],
-            channel_thumbnail_url=channel_info.get("thumbnail_url"),
-            encrypted_access_token=encrypt_token(credentials.token),
-            encrypted_refresh_token=encrypt_token(credentials.refresh_token),
-            token_expires_at=token_expires_at,
-            scopes=" ".join(credentials.scopes or settings.google_scopes),
-        )
-        await self._session.commit()
+        try:
+            account = await yt_crud.create_youtube_account(
+                self._session,
+                user_id=user_id,
+                nickname=nickname,
+                channel_id=channel_id,
+                channel_title=channel_info["channel_title"],
+                channel_thumbnail_url=channel_info.get("thumbnail_url"),
+                encrypted_access_token=encrypt_token(credentials.token),
+                encrypted_refresh_token=encrypt_token(refresh_token),
+                token_expires_at=token_expires_at,
+                scopes=scopes,
+            )
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise ConflictError(
+                "Yeh channel pehle se connect ho chuka hai. Page refresh karke dekho."
+            )
 
         logger.info(
             "YouTube account '%s' connected for user %s", channel_info["channel_title"], user_id
@@ -236,7 +301,10 @@ class YouTubeManagementService:
         )
 
     async def list_accounts(self, user_id: uuid.UUID) -> AccountListResponse:
-        """User ke saare connected (active) YouTube accounts."""
+        """
+        User ke saare connected YouTube accounts.
+        Jin accounts ko reconnect chahiye unme needs_reconnect = True aata hai.
+        """
         accounts = await yt_crud.get_accounts_by_user(self._session, user_id)
         active = [a for a in accounts if a.is_active]
         return AccountListResponse(
@@ -266,13 +334,8 @@ class YouTubeManagementService:
 
         # Google par refresh token revoke karne ki koshish karo
         try:
-            credentials = _credentials_from_account(account)
-            import requests as req
-            req.post(
-                "https://oauth2.googleapis.com/revoke",
-                params={"token": credentials.refresh_token},
-                timeout=5,
-            )
+            refresh_token = decrypt_token(account.encrypted_refresh_token)
+            await asyncio.to_thread(_revoke_token_sync, refresh_token)
         except Exception:
             # Revoke fail ho toh bhi DB se hata do
             logger.warning(
@@ -292,26 +355,32 @@ class YouTubeManagementService:
         Agar access token expire ho gaya hai toh automatically refresh karta hai.
         """
         account = await self._get_active_account(user_id, account_id)
+
+        if account.needs_reconnect:
+            raise ValidationError(
+                "YouTube account ki permission expire ho gayi hai. Kripya account dobara connect karo."
+            )
+
         credentials = _credentials_from_account(account)
 
-        # Token expire ho gaya? Refresh karo
-        if ensure_utc(account.token_expires_at) <= utc_now():
+        refresh_deadline = utc_now() + timedelta(seconds=_TOKEN_REFRESH_SKEW_SECONDS)
+        if ensure_utc(account.token_expires_at) <= refresh_deadline:
             try:
-                credentials.refresh(Request())
-                await yt_crud.update_account_tokens(
-                    self._session,
-                    account,
-                    encrypted_access_token=encrypt_token(credentials.token),
-                    token_expires_at=credentials.expiry or utc_now() + timedelta(hours=1),
-                )
-                await self._session.commit()
+                await asyncio.to_thread(_refresh_credentials_sync, credentials)
             except RefreshError:
-                # Refresh token bhi expire/revoked — user ko dobara connect karna hoga
-                await yt_crud.deactivate_account(self._session, account)
+                # Refresh token expire/revoked — account list mein "reconnect needed" dikhega
+                await yt_crud.mark_needs_reconnect(self._session, account)
                 await self._session.commit()
                 raise ValidationError(
                     "YouTube account ki permission expire ho gayi. Kripya account dobara connect karo."
                 )
+            await yt_crud.update_account_tokens(
+                self._session,
+                account,
+                encrypted_access_token=encrypt_token(credentials.token),
+                token_expires_at=_expiry_of(credentials),
+            )
+            await self._session.commit()
 
         return credentials
 

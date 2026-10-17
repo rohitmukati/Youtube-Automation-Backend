@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, Uuid, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -16,6 +16,9 @@ class YouTubeAccount(TimestampMixin, Base):
     OAuth tokens encrypted form mein store hote hain.
     """
     __tablename__ = "youtube_accounts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "channel_id", name="uq_youtube_accounts_user_channel"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, default=uuid.uuid4
@@ -50,6 +53,9 @@ class YouTubeAccount(TimestampMixin, Base):
     scopes: Mapped[str] = mapped_column(Text, nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    needs_reconnect: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     last_used_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

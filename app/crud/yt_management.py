@@ -135,6 +135,38 @@ async def update_account_tokens(
     return account
 
 
+async def reconnect_account(
+    session: AsyncSession,
+    account: YouTubeAccount,
+    *,
+    nickname: str,
+    channel_title: str,
+    channel_thumbnail_url: Optional[str],
+    encrypted_access_token: str,
+    encrypted_refresh_token: str,
+    token_expires_at: datetime,
+    scopes: str,
+) -> YouTubeAccount:
+    account.nickname = nickname
+    account.channel_title = channel_title
+    account.channel_thumbnail_url = channel_thumbnail_url
+    account.encrypted_access_token = encrypted_access_token
+    account.encrypted_refresh_token = encrypted_refresh_token
+    account.token_expires_at = token_expires_at
+    account.scopes = scopes
+    account.is_active = True
+    account.needs_reconnect = False
+    await session.flush()
+    return account
+
+
+async def mark_needs_reconnect(
+    session: AsyncSession, account: YouTubeAccount
+) -> None:
+    account.needs_reconnect = True
+    await session.flush()
+
+
 async def update_account_nickname(
     session: AsyncSession,
     account: YouTubeAccount,
@@ -153,6 +185,7 @@ async def deactivate_account(
     Row rakhte hain audit ke liye; hard delete nahi karte.
     """
     account.is_active = False
+    account.needs_reconnect = False
     account.encrypted_access_token = ""
     account.encrypted_refresh_token = ""
     await session.flush()

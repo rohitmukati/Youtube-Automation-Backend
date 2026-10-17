@@ -42,6 +42,7 @@ class YouTubeAccountResponse(BaseModel):
     channel_title: str
     channel_thumbnail_url: Optional[str] = None
     is_active: bool
+    needs_reconnect: bool = False
     last_used_at: Optional[datetime] = None
     created_at: datetime
 

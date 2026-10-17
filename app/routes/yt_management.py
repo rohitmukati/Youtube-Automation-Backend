@@ -1,10 +1,14 @@
+import logging
 import uuid
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Query, status
 from fastapi.responses import RedirectResponse
 
+from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession
+from app.core.exceptions import AppException
 from app.schemas.yt_management import (
     AccountListResponse,
     ConnectAccountRequest,
@@ -16,7 +20,14 @@ from app.schemas.yt_management import (
 )
 from app.service.yt_management import YouTubeManagementService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/youtube", tags=["YouTube Management"])
+
+
+def _frontend_redirect(**params: str) -> RedirectResponse:
+    query = urlencode(params)
+    return RedirectResponse(url=f"{settings.frontend_url}/youtube/connect?{query}")
 
 
 @router.post(
@@ -59,12 +70,8 @@ async def oauth_callback(
     - Success → frontend ke success page par redirect
     - Failure → frontend ke error page par redirect
     """
-    from app.config import settings
-
     if error or not code or not state:
-        return RedirectResponse(
-            url=f"{settings.frontend_url}/youtube/connect?status=error&reason={error or 'missing_params'}"
-        )
+        return _frontend_redirect(status="error", reason=error or "missing_params")
 
     try:
         result = await YouTubeManagementService(session).handle_callback(
@@ -72,18 +79,20 @@ async def oauth_callback(
             state_token=state,
             error=error,
         )
-        channel_title = result.account.channel_title
-        account_id = str(result.account.id)
-        return RedirectResponse(
-            url=(
-                f"{settings.frontend_url}/youtube/connect"
-                f"?status=success&channel={channel_title}&account_id={account_id}"
-            )
+    except AppException as exc:
+        return _frontend_redirect(status="error", reason=exc.message)
+    except Exception:
+        logger.exception("Unexpected error in YouTube OAuth callback")
+        return _frontend_redirect(
+            status="error",
+            reason="Something went wrong while connecting the account. Please try again.",
         )
-    except Exception as exc:
-        return RedirectResponse(
-            url=f"{settings.frontend_url}/youtube/connect?status=error&reason={str(exc)}"
-        )
+
+    return _frontend_redirect(
+        status="success",
+        channel=result.account.channel_title,
+        account_id=str(result.account.id),
+    )
 
 
 @router.get(
