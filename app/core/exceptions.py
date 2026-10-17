@@ -27,6 +27,11 @@ class BadRequestError(AppException):
     message = "The request could not be processed. Please check your input and try again."
 
 
+class ValidationError(BadRequestError):
+    code = "validation_error"
+    message = "Some of the information you entered is not valid. Please review it and try again."
+
+
 class AuthenticationError(AppException):
     status_code = 401
     code = "authentication_failed"
