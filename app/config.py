@@ -17,33 +17,47 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ── App ───────────────────────────────────────────────────────────
     app_name: ClassVar[str] = "Youtube Automation Backend"
-    debug: ClassVar[bool] = False
+    app_env: ClassVar[str] = "development"
+    debug: ClassVar[bool] = True
     log_level: ClassVar[str] = "INFO"
     api_v1_prefix: ClassVar[str] = "/api/v1"
+    frontend_url: ClassVar[str] = "http://localhost:3000"
+    cors_origins: ClassVar[List[str]] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
 
+    # ── Database ──────────────────────────────────────────────────────
     db_pool_size: ClassVar[int] = 5
     db_max_overflow: ClassVar[int] = 10
     db_auto_create_tables: ClassVar[bool] = True
 
+    # ── JWT ───────────────────────────────────────────────────────────
     jwt_algorithm: ClassVar[str] = "HS256"
     access_token_expire_minutes: ClassVar[int] = 30
     refresh_token_expire_days: ClassVar[int] = 7
 
+    # ── Password / OTP ────────────────────────────────────────────────
     password_min_length: ClassVar[int] = 8
     otp_length: ClassVar[int] = 6
     password_reset_otp_expire_minutes: ClassVar[int] = 10
     password_reset_otp_max_attempts: ClassVar[int] = 5
     password_reset_otp_resend_cooldown_seconds: ClassVar[int] = 60
 
+    # ── SMTP (non-secret defaults) ────────────────────────────────────
     smtp_host: ClassVar[str] = "smtp.gmail.com"
     smtp_port: ClassVar[int] = 587
     smtp_use_tls: ClassVar[bool] = True
     smtp_timeout_seconds: ClassVar[int] = 15
     smtp_from_name: ClassVar[str] = "Youtube Automation"
 
+    # ── Supabase ──────────────────────────────────────────────────────
     supabase_storage_bucket: ClassVar[str] = "artifacts"
 
+    # ── Google / YouTube ──────────────────────────────────────────────
+    google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"
     google_scopes: ClassVar[List[str]] = [
         "openid",
         "https://www.googleapis.com/auth/userinfo.email",
@@ -51,31 +65,28 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/youtube.readonly",
     ]
 
-    app_env: str = "development"
-    cors_origins: Annotated[List[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
-    )
+    # ══════════════════════════════════════════════════════════════════
+    # Fields below come from .env  — these are the ONLY env vars needed
+    # ══════════════════════════════════════════════════════════════════
 
+    # Required
     database_url: SecretStr
     jwt_secret_key: SecretStr
 
+    # SMTP credentials
     smtp_username: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
 
+    # Supabase (optional until storage features are built)
     supabase_url: Optional[str] = None
     supabase_service_role_key: Optional[SecretStr] = None
 
+    # Google OAuth (optional until YouTube features are built)
     google_client_id: Optional[str] = None
     google_client_secret: Optional[SecretStr] = None
-    google_redirect_uri: str = "http://localhost:8000/api/v1/youtube/callback"
     token_encryption_key: Optional[SecretStr] = None
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, value):
-        if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
+    # ── Validators ────────────────────────────────────────────────────
 
     @field_validator("database_url")
     @classmethod
@@ -89,7 +100,7 @@ class Settings(BaseSettings):
         if not raw.startswith(allowed_prefixes):
             raise ValueError(
                 "DATABASE_URL must be a PostgreSQL connection string, "
-                "for example postgresql://user:password@host:5432/postgres"
+                "e.g. postgresql://user:password@host:5432/postgres"
             )
         return SecretStr(raw)
 
@@ -106,6 +117,8 @@ class Settings(BaseSettings):
         if value is None:
             return value
         return SecretStr(value.get_secret_value().replace(" ", ""))
+
+    # ── Computed properties ───────────────────────────────────────────
 
     @property
     def is_production(self) -> bool:
