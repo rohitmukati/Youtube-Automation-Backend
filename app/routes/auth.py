@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, status
 
 from app.config import settings
-from app.core.dependencies import DbSession, get_email_service
+from app.core.dependencies import CurrentUser, DbSession, get_email_service
 from app.schemas.auth import (
     AuthResponse,
     ForgotPasswordRequest,
@@ -13,9 +13,10 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     SignupRequest,
     TokenResponse,
+    UserResponse,
 )
-from app.service.auth_service import AuthService
-from app.service.email_service import EmailService
+from app.service.auth import AuthService
+from app.service.email import EmailService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -65,3 +66,8 @@ async def reset_password(payload: ResetPasswordRequest, session: DbSession) -> M
     return MessageResponse(
         message="Your password has been reset successfully. Please log in with your new password."
     )
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_me(current_user: CurrentUser) -> UserResponse:
+    return UserResponse.model_validate(current_user)

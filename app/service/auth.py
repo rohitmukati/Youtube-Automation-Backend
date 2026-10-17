@@ -16,10 +16,8 @@ from app.core.exceptions import (
     TokenExpiredError,
     TooManyAttemptsError,
 )
-from app.crud import password_reset_otp as otp_crud
-from app.crud import refresh_token as refresh_token_crud
-from app.crud import user as user_crud
-from app.models.user import User
+from app.crud import auth as auth_crud
+from app.models.auth import User
 from app.schemas.auth import (
     AuthResponse,
     LoginRequest,
@@ -28,7 +26,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
-from app.service.email_service import OtpDelivery
+from app.service.email import OtpDelivery
 from app.utils.datetime_utils import ensure_utc, utc_now
 
 logger = logging.getLogger(__name__)
@@ -39,12 +37,12 @@ class AuthService:
         self._session = session
 
     async def signup(self, data: SignupRequest) -> AuthResponse:
-        if await user_crud.get_by_email(self._session, data.email):
+        if await auth_crud.get_user_by_email(self._session, data.email):
             raise EmailAlreadyRegisteredError()
 
         password_hash = await security.hash_password(data.password)
         try:
-            user = await user_crud.create(
+            user = await auth_crud.create_user(
                 self._session,
                 name=data.name,
                 email=data.email,
@@ -61,7 +59,7 @@ class AuthService:
         return AuthResponse(user=UserResponse.model_validate(user), tokens=tokens)
 
     async def login(self, data: LoginRequest) -> AuthResponse:
-        user = await user_crud.get_by_email(self._session, data.email)
+        user = await auth_crud.get_user_by_email(self._session, data.email)
         if user is None:
             await security.burn_password_check(data.password)
             raise InvalidCredentialsError()
@@ -80,14 +78,14 @@ class AuthService:
         return AuthResponse(user=UserResponse.model_validate(user), tokens=tokens)
 
     async def refresh(self, raw_refresh_token: str) -> TokenResponse:
-        record = await refresh_token_crud.get_by_hash(
+        record = await auth_crud.get_refresh_token_by_hash(
             self._session, security.hash_token(raw_refresh_token)
         )
         if record is None:
             raise InvalidTokenError()
 
         if record.revoked_at is not None:
-            await refresh_token_crud.revoke_all_for_user(self._session, record.user_id)
+            await auth_crud.revoke_all_refresh_tokens(self._session, record.user_id)
             await self._session.commit()
             logger.warning("Revoked refresh token reuse detected for user %s", record.user_id)
             raise InvalidTokenError()
@@ -95,7 +93,7 @@ class AuthService:
         if ensure_utc(record.expires_at) <= utc_now():
             raise TokenExpiredError()
 
-        user = await user_crud.get_by_id(self._session, record.user_id)
+        user = await auth_crud.get_user_by_id(self._session, record.user_id)
         if user is None:
             raise InvalidTokenError()
         if not user.is_active:
@@ -107,7 +105,7 @@ class AuthService:
         return tokens
 
     async def logout(self, raw_refresh_token: str) -> None:
-        record = await refresh_token_crud.get_by_hash(
+        record = await auth_crud.get_refresh_token_by_hash(
             self._session, security.hash_token(raw_refresh_token)
         )
         if record is not None and record.revoked_at is None:
@@ -115,18 +113,18 @@ class AuthService:
             await self._session.commit()
 
     async def request_password_reset(self, email: str) -> Optional[OtpDelivery]:
-        user = await user_crud.get_by_email(self._session, email)
+        user = await auth_crud.get_user_by_email(self._session, email)
         if user is None or not user.is_active:
             return None
 
-        latest = await otp_crud.get_latest_for_user(self._session, user.id)
+        latest = await auth_crud.get_latest_password_reset_otp(self._session, user.id)
         cooldown = timedelta(seconds=settings.password_reset_otp_resend_cooldown_seconds)
         if latest is not None and ensure_utc(latest.created_at) + cooldown > utc_now():
             return None
 
-        await otp_crud.invalidate_all_for_user(self._session, user.id)
+        await auth_crud.invalidate_password_reset_otps(self._session, user.id)
         otp = security.generate_otp()
-        await otp_crud.create(
+        await auth_crud.create_password_reset_otp(
             self._session,
             user_id=user.id,
             otp_hash=security.hash_otp(user.email, otp),
@@ -141,11 +139,11 @@ class AuthService:
         )
 
     async def reset_password(self, data: ResetPasswordRequest) -> None:
-        user = await user_crud.get_by_email(self._session, data.email)
+        user = await auth_crud.get_user_by_email(self._session, data.email)
         if user is None or not user.is_active:
             raise InvalidOtpError()
 
-        record = await otp_crud.get_active_for_user(self._session, user.id)
+        record = await auth_crud.get_active_password_reset_otp(self._session, user.id)
         if record is None or ensure_utc(record.expires_at) <= utc_now():
             raise InvalidOtpError()
 
@@ -159,14 +157,14 @@ class AuthService:
 
         user.password_hash = await security.hash_password(data.new_password)
         record.used_at = utc_now()
-        await refresh_token_crud.revoke_all_for_user(self._session, user.id)
+        await auth_crud.revoke_all_refresh_tokens(self._session, user.id)
         await self._session.commit()
         logger.info("Password reset completed for user %s", user.id)
 
     async def _issue_tokens(self, user: User) -> TokenResponse:
         access_token, expires_in = security.create_access_token(user.id)
         raw_refresh_token = security.generate_refresh_token()
-        await refresh_token_crud.create(
+        await auth_crud.create_refresh_token(
             self._session,
             user_id=user.id,
             token_hash=security.hash_token(raw_refresh_token),

@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.exceptions import AccountDisabledError, AuthenticationError, InvalidTokenError
 from app.core.security import decode_access_token
-from app.crud import user as user_crud
+from app.crud import auth as auth_crud
 from app.integrations.smtp_email import SmtpEmailSender
-from app.models.user import User
-from app.service.email_service import EmailService
+from app.models.auth import User
+from app.service.email import EmailService
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -35,7 +35,7 @@ async def get_current_user(
     except (ValueError, KeyError) as exc:
         raise InvalidTokenError() from exc
 
-    user = await user_crud.get_by_id(session, user_id)
+    user = await auth_crud.get_user_by_id(session, user_id)
     if user is None:
         raise InvalidTokenError()
     if not user.is_active:

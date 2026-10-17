@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, List, Optional
+from typing import Annotated, ClassVar, List, Optional
 
 from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -17,44 +17,46 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Youtube Automation Backend"
+    app_name: ClassVar[str] = "Youtube Automation Backend"
+    debug: ClassVar[bool] = False
+    log_level: ClassVar[str] = "INFO"
+    api_v1_prefix: ClassVar[str] = "/api/v1"
+
+    db_pool_size: ClassVar[int] = 5
+    db_max_overflow: ClassVar[int] = 10
+    db_auto_create_tables: ClassVar[bool] = True
+
+    jwt_algorithm: ClassVar[str] = "HS256"
+    access_token_expire_minutes: ClassVar[int] = 30
+    refresh_token_expire_days: ClassVar[int] = 7
+
+    password_min_length: ClassVar[int] = 8
+    otp_length: ClassVar[int] = 6
+    password_reset_otp_expire_minutes: ClassVar[int] = 10
+    password_reset_otp_max_attempts: ClassVar[int] = 5
+    password_reset_otp_resend_cooldown_seconds: ClassVar[int] = 60
+
+    smtp_host: ClassVar[str] = "smtp.gmail.com"
+    smtp_port: ClassVar[int] = 587
+    smtp_use_tls: ClassVar[bool] = True
+    smtp_timeout_seconds: ClassVar[int] = 15
+    smtp_from_name: ClassVar[str] = "Youtube Automation"
+
+    supabase_storage_bucket: ClassVar[str] = "artifacts"
+
     app_env: str = "development"
-    debug: bool = False
-    log_level: str = "INFO"
-    api_v1_prefix: str = "/api/v1"
-    frontend_url: str = "http://localhost:3000"
     cors_origins: Annotated[List[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )
 
     database_url: SecretStr
-    db_pool_size: int = Field(default=5, ge=1, le=50)
-    db_max_overflow: int = Field(default=10, ge=0, le=100)
-    db_auto_create_tables: bool = True
-
     jwt_secret_key: SecretStr
-    jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = Field(default=30, ge=1)
-    refresh_token_expire_days: int = Field(default=7, ge=1)
 
-    password_min_length: int = Field(default=8, ge=6, le=64)
-    otp_length: int = Field(default=6, ge=4, le=8)
-    password_reset_otp_expire_minutes: int = Field(default=10, ge=1)
-    password_reset_otp_max_attempts: int = Field(default=5, ge=1)
-    password_reset_otp_resend_cooldown_seconds: int = Field(default=60, ge=0)
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[SecretStr] = None
 
     supabase_url: Optional[str] = None
     supabase_service_role_key: Optional[SecretStr] = None
-    supabase_storage_bucket: str = "artifacts"
-
-    smtp_host: Optional[str] = None
-    smtp_port: int = 587
-    smtp_username: Optional[str] = None
-    smtp_password: Optional[SecretStr] = None
-    smtp_from_email: Optional[str] = None
-    smtp_from_name: str = "Youtube Automation"
-    smtp_use_tls: bool = True
-    smtp_timeout_seconds: int = Field(default=15, ge=1)
 
     google_client_id: Optional[str] = None
     google_client_secret: Optional[SecretStr] = None
@@ -91,14 +93,6 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters long")
         return value
 
-    @field_validator("log_level")
-    @classmethod
-    def normalize_log_level(cls, value: str) -> str:
-        level = value.strip().upper()
-        if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-            raise ValueError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
-        return level
-
     @field_validator("smtp_password")
     @classmethod
     def strip_smtp_password_spaces(cls, value: Optional[SecretStr]) -> Optional[SecretStr]:
@@ -111,14 +105,15 @@ class Settings(BaseSettings):
         return self.app_env.lower() == "production"
 
     @property
+    def smtp_from_email(self) -> Optional[str]:
+        return self.smtp_username
+
+    @property
     def smtp_configured(self) -> bool:
-        return all(
-            [
-                self.smtp_host,
-                self.smtp_username,
-                self.smtp_password and self.smtp_password.get_secret_value(),
-                self.smtp_from_email,
-            ]
+        return bool(
+            self.smtp_username
+            and self.smtp_password
+            and self.smtp_password.get_secret_value()
         )
 
 
