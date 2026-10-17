@@ -15,3 +15,5 @@ google-api-python-client==2.154.0
 google-auth==2.38.0
 cryptography==44.0.2
 requests==2.32.3
+
+python-multipart==0.0.20

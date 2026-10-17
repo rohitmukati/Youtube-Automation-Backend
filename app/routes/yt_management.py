@@ -22,7 +22,7 @@ from app.service.yt_management import YouTubeManagementService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/youtube", tags=["YouTube Management"])
+router = APIRouter(prefix="/youtube", tags=["YouTube Account Management"])
 
 
 def _frontend_redirect(**params: str) -> RedirectResponse:

@@ -1,5 +1,6 @@
 from app.models.auth import PasswordResetOtp, RefreshToken, User
 from app.models.base import Base
+from app.models.storage_bucket import StorageFile, StorageFileTag
 from app.models.yt_management import OAuthState, YouTubeAccount
 
 __all__ = [
@@ -9,4 +10,6 @@ __all__ = [
     "User",
     "OAuthState",
     "YouTubeAccount",
+    "StorageFile",
+    "StorageFileTag",
 ]

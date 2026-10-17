@@ -56,6 +56,31 @@ class Settings(BaseSettings):
     # ── Supabase ──────────────────────────────────────────────────────
     supabase_storage_bucket: ClassVar[str] = "artifacts"
 
+    # ── Storage Bucket ────────────────────────────────────────────────
+    storage_signed_url_ttl_seconds: ClassVar[int] = 3600
+    storage_request_timeout_seconds: ClassVar[int] = 30
+    storage_upload_timeout_seconds: ClassVar[int] = 600
+    storage_video_max_bytes: ClassVar[int] = 50 * 1024 * 1024
+    storage_image_max_bytes: ClassVar[int] = 10 * 1024 * 1024
+    storage_video_content_types: ClassVar[List[str]] = [
+        "video/mp4",
+        "video/quicktime",
+        "video/x-msvideo",
+        "video/x-matroska",
+        "video/webm",
+        "video/mpeg",
+    ]
+    storage_image_content_types: ClassVar[List[str]] = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+    ]
+    storage_max_tags: ClassVar[int] = 20
+    storage_max_tag_length: ClassVar[int] = 30
+    storage_list_default_limit: ClassVar[int] = 20
+    storage_list_max_limit: ClassVar[int] = 100
+
     # ── Google / YouTube ──────────────────────────────────────────────
     google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"
     google_scopes: ClassVar[List[str]] = [
