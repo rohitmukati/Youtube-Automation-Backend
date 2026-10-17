@@ -44,6 +44,13 @@ class Settings(BaseSettings):
 
     supabase_storage_bucket: ClassVar[str] = "artifacts"
 
+    google_scopes: ClassVar[List[str]] = [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly",
+    ]
+
     app_env: str = "development"
     cors_origins: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
@@ -60,7 +67,7 @@ class Settings(BaseSettings):
 
     google_client_id: Optional[str] = None
     google_client_secret: Optional[SecretStr] = None
-    google_redirect_uri: Optional[str] = None
+    google_redirect_uri: str = "http://localhost:8000/api/v1/youtube/callback"
     token_encryption_key: Optional[SecretStr] = None
 
     @field_validator("cors_origins", mode="before")
