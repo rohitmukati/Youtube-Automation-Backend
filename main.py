@@ -1,3 +1,4 @@
+# main.py
 import logging
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,7 @@ from app.core.handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.routes import api_router
 from app.routes import health
+from app.workers.yt_channel_management import start_worker, stop_worker
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -19,8 +21,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(application: FastAPI):
     if settings.db_auto_create_tables:
         await create_tables()
+    worker = start_worker() if settings.yt_upload_worker_enabled else None
     logger.info("%s started in %s mode", settings.app_name, settings.app_env)
     yield
+    if worker is not None:
+        await stop_worker(worker)
     await dispose_engine()
     logger.info("%s stopped", settings.app_name)
 

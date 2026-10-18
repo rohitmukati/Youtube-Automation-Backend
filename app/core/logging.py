@@ -1,3 +1,4 @@
+# app/core/logging.py
 import logging
 import logging.config
 
@@ -24,7 +25,7 @@ def setup_logging() -> None:
             "root": {"level": settings.log_level, "handlers": ["console"]},
             "loggers": {
                 "sqlalchemy.engine": {
-                    "level": "INFO" if settings.debug else "WARNING",
+                    "level": "INFO" if settings.log_sql else "WARNING",
                     "handlers": ["console"],
                     "propagate": False,
                 },

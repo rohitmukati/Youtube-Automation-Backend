@@ -1,3 +1,4 @@
+# app/config.py
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, ClassVar, List, Optional
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     app_env: ClassVar[str] = "development"
     debug: ClassVar[bool] = True
     log_level: ClassVar[str] = "INFO"
+    log_sql: ClassVar[bool] = False
     api_v1_prefix: ClassVar[str] = "/api/v1"
     frontend_url: ClassVar[str] = "http://localhost:3000"
     cors_origins: ClassVar[List[str]] = [
@@ -80,6 +82,36 @@ class Settings(BaseSettings):
     storage_max_tag_length: ClassVar[int] = 30
     storage_list_default_limit: ClassVar[int] = 20
     storage_list_max_limit: ClassVar[int] = 100
+
+    # ── YouTube Channel Management (uploads) ──────────────────────────
+    yt_upload_max_accounts: ClassVar[int] = 50
+    yt_upload_max_attempts: ClassVar[int] = 3
+    yt_upload_retry_delays_seconds: ClassVar[List[int]] = [30, 120]
+    yt_upload_chunk_bytes: ClassVar[int] = 8 * 1024 * 1024
+    yt_upload_chunk_retries: ClassVar[int] = 3
+    yt_upload_concurrency: ClassVar[int] = 3
+    yt_upload_daily_limit: ClassVar[int] = 100
+    yt_upload_quota_timezone: ClassVar[str] = "America/Los_Angeles"
+    yt_upload_worker_enabled: ClassVar[bool] = True
+    yt_upload_worker_poll_seconds: ClassVar[int] = 3
+    yt_upload_worker_shutdown_seconds: ClassVar[int] = 60
+    yt_upload_stale_after_seconds: ClassVar[int] = 600
+    yt_upload_stale_sweep_seconds: ClassVar[int] = 60
+    yt_upload_source_url_ttl_seconds: ClassVar[int] = 6 * 3600
+    yt_upload_progress_interval_seconds: ClassVar[int] = 3
+    yt_upload_range_timeout_seconds: ClassVar[int] = 60
+    yt_upload_error_max_length: ClassVar[int] = 500
+    yt_title_max_length: ClassVar[int] = 100
+    yt_description_max_bytes: ClassVar[int] = 5000
+    yt_tag_max_length: ClassVar[int] = 30
+    yt_max_tags: ClassVar[int] = 100
+    yt_tags_max_total_chars: ClassVar[int] = 500
+    yt_default_category_id: ClassVar[str] = "22"
+    yt_default_privacy: ClassVar[str] = "private"
+    yt_thumbnail_content_types: ClassVar[List[str]] = ["image/jpeg", "image/png"]
+    yt_watch_url_template: ClassVar[str] = "https://www.youtube.com/watch?v={video_id}"
+    yt_list_default_limit: ClassVar[int] = 20
+    yt_list_max_limit: ClassVar[int] = 100
 
     # ── Google / YouTube ──────────────────────────────────────────────
     google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"

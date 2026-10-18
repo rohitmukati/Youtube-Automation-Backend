@@ -1,9 +1,18 @@
+# app/models/__init__.py
 from app.models.auth import PasswordResetOtp, RefreshToken, User
 from app.models.base import Base
 from app.models.storage_bucket import StorageFile, StorageFileTag
+from app.models.yt_channel_management import (
+    YtUploadJob,
+    YtUploadQuotaDay,
+    YtUploadTarget,
+)
 from app.models.yt_management import OAuthState, YouTubeAccount
 
 __all__ = [
+    "YtUploadJob",
+    "YtUploadQuotaDay",
+    "YtUploadTarget",
     "Base",
     "PasswordResetOtp",
     "RefreshToken",
