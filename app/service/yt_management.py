@@ -20,7 +20,9 @@ from app.core.exceptions import (
     AccountDisabledError,
     AppException,
     ConflictError,
+    GoogleCredentialsInvalidError,
     NotFoundError,
+    ServiceUnavailableError,
     ValidationError,
 )
 from app.crud import yt_management as yt_crud
@@ -31,53 +33,56 @@ from app.schemas.yt_management import (
     ConnectSuccessResponse,
     YouTubeAccountResponse,
 )
+from app.service.google_credentials import GoogleClient, load_client
 from app.utils.datetime_utils import ensure_utc, utc_now
 from app.utils.token_encryption import decrypt_token, encrypt_token
 
 logger = logging.getLogger(__name__)
 
-# OAuth state is valid for 10 minutes only
 _OAUTH_STATE_TTL_MINUTES = 10
-
-# Refresh the access token slightly before it expires
 _TOKEN_REFRESH_SKEW_SECONDS = 60
-
+_TOKEN_URI = "https://oauth2.googleapis.com/token"
+_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+_REJECTED_CLIENT_ERRORS = {"invalid_client", "unauthorized_client"}
+_RECONNECT_MESSAGE = (
+    "This YouTube account permission has expired. Please reconnect the account."
+)
 
 
-def _build_flow() -> Flow:
-    """
-    Builds a Google OAuth flow.
-    A CLIENT_SECRETS file is not required — we use client_id/secret directly.
-    """
+def _build_flow(client: GoogleClient) -> Flow:
     client_config = {
         "web": {
-            "client_id": settings.google_client_id,
-            "client_secret": settings.google_client_secret.get_secret_value(),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "auth_uri": _AUTH_URI,
+            "token_uri": _TOKEN_URI,
             "redirect_uris": [settings.google_redirect_uri],
         }
     }
-    flow = Flow.from_client_config(
+    return Flow.from_client_config(
         client_config,
         scopes=settings.google_scopes,
         redirect_uri=settings.google_redirect_uri,
         autogenerate_code_verifier=False,
     )
-    return flow
 
 
-def _credentials_from_account(account: YouTubeAccount) -> Credentials:
-    """Builds decrypted credentials from the database."""
+def _credentials_from_account(account: YouTubeAccount, client: GoogleClient) -> Credentials:
     return Credentials(
         token=decrypt_token(account.encrypted_access_token),
         refresh_token=decrypt_token(account.encrypted_refresh_token),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=settings.google_client_id,
-        client_secret=settings.google_client_secret.get_secret_value(),
+        token_uri=_TOKEN_URI,
+        client_id=client.client_id,
+        client_secret=client.client_secret,
         scopes=account.scopes.split(" "),
     )
+
+
+def _client_rejected(exc: RefreshError) -> bool:
+    detail = exc.args[1] if len(exc.args) > 1 else None
+    error = detail.get("error") if isinstance(detail, dict) else None
+    return error in _REJECTED_CLIENT_ERRORS
 
 
 def _expiry_of(credentials: Credentials) -> datetime:
@@ -86,17 +91,13 @@ def _expiry_of(credentials: Credentials) -> datetime:
     return utc_now() + timedelta(hours=1)
 
 
-def _exchange_code_sync(code: str) -> Credentials:
-    flow = _build_flow()
+def _exchange_code_sync(code: str, client: GoogleClient) -> Credentials:
+    flow = _build_flow(client)
     flow.fetch_token(code=code)
     return flow.credentials
 
 
 def _fetch_channel_info_sync(credentials: Credentials) -> dict:
-    """
-    Fetches the basic channel information from the YouTube API.
-    Returns: {channel_id, channel_title, thumbnail_url}
-    """
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
     response = youtube.channels().list(part="snippet", mine=True).execute()
     items = response.get("items", [])
@@ -154,34 +155,21 @@ class YouTubeManagementService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    def _check_google_configured(self) -> None:
-        if not settings.google_client_id or not settings.google_client_secret:
-            raise ValidationError(
-                "Google OAuth credentials are not configured. "
-                "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the .env file."
-            )
+    def _check_encryption_ready(self) -> None:
         if not settings.token_encryption_key:
-            raise ValidationError(
-                "TOKEN_ENCRYPTION_KEY is not set in the .env file. "
-                "This is required to encrypt tokens."
+            raise ServiceUnavailableError(
+                "Secure storage is not configured on the server. Please contact support."
             )
 
     async def initiate_connect(
         self, user_id: uuid.UUID, nickname: str
     ) -> ConnectInitiateResponse:
-        """
-        Step 1: the user provides a nickname → a Google OAuth URL is generated.
-        The frontend redirects the user to this URL.
-        """
-        self._check_google_configured()
+        self._check_encryption_ready()
+        client = await load_client(self._session, user_id)
 
-        # Remove expired states
         await yt_crud.cleanup_expired_oauth_states(self._session)
 
-        # Create a random state token (CSRF protection)
         state_token = secrets.token_urlsafe(32)
-
-        # Save the state in the database (valid for 10 minutes)
         await yt_crud.create_oauth_state(
             self._session,
             state_token=state_token,
@@ -191,12 +179,9 @@ class YouTubeManagementService:
         )
         await self._session.commit()
 
-        # Build the Google OAuth URL
-        flow = _build_flow()
+        flow = _build_flow(client)
         auth_url, _ = flow.authorization_url(
-            access_type="offline",  # A refresh token will be provided
-            # select_account: show the account chooser each time so the user can choose a different Gmail account
-            # consent: request consent each time (new refresh token)
+            access_type="offline",
             prompt="select_account consent",
             include_granted_scopes="false",
             state=state_token,
@@ -211,17 +196,11 @@ class YouTubeManagementService:
         state_token: str,
         error: Optional[str] = None,
     ) -> ConnectSuccessResponse:
-        """
-        Step 2: Google sends the code + state on callback.
-        Exchange tokens, fetch channel info, and save it to the database.
-        """
-        self._check_google_configured()
+        self._check_encryption_ready()
 
-        # Did the user deny permission?
         if error:
             raise ValidationError(f"Google denied permission: {error}")
 
-        # Verify the state (CSRF check)
         state_record = await yt_crud.get_oauth_state(self._session, state_token)
         if state_record is None:
             raise ValidationError("Invalid or expired OAuth state. Please try again.")
@@ -234,20 +213,21 @@ class YouTubeManagementService:
         user_id = state_record.user_id
         nickname = state_record.nickname
 
-        # The state is single-use: it should not be used again even if something fails later
         await yt_crud.delete_oauth_state(self._session, state_token)
         await self._session.commit()
 
+        client = await load_client(self._session, user_id)
+
         try:
-            # Google calls are blocking, so run them in a thread
-            credentials = await asyncio.to_thread(_exchange_code_sync, code)
+            credentials = await asyncio.to_thread(_exchange_code_sync, code, client)
             channel_info = await asyncio.to_thread(_fetch_channel_info_sync, credentials)
         except AppException:
             raise
         except Exception:
             logger.exception("Google OAuth callback failed for user %s", user_id)
             raise ValidationError(
-                "The Google account could not be connected. Please try again."
+                "The Google account could not be connected. Check your saved Client ID, "
+                "Client Secret and redirect URI, then try again."
             )
 
         google_email = await asyncio.to_thread(_fetch_email_sync, credentials)
@@ -275,7 +255,6 @@ class YouTubeManagementService:
             )
 
         if existing is not None:
-            # Reconnect = refresh tokens, scopes, and channel info
             logger.info(
                 "Re-connecting existing channel %s for user %s", channel_id, user_id
             )
@@ -297,7 +276,6 @@ class YouTubeManagementService:
                 account=YouTubeAccountResponse.model_validate(existing),
             )
 
-        # Save the new account
         try:
             account = await yt_crud.create_youtube_account(
                 self._session,
@@ -328,10 +306,6 @@ class YouTubeManagementService:
         )
 
     async def list_accounts(self, user_id: uuid.UUID) -> AccountListResponse:
-        """
-        All connected YouTube accounts for the user.
-        Accounts that need reconnection have needs_reconnect = True.
-        """
         accounts = await yt_crud.get_accounts_by_user(self._session, user_id)
         active = [a for a in accounts if a.is_active]
         return AccountListResponse(
@@ -409,19 +383,12 @@ class YouTubeManagementService:
     async def disconnect_account(
         self, user_id: uuid.UUID, account_id: uuid.UUID
     ) -> None:
-        """
-        Disconnect the account:
-        1. Revoke the token on Google
-        2. Clear the tokens in the DB and set is_active = False
-        """
         account = await self._get_active_account(user_id, account_id)
 
-        # Try to revoke the refresh token on Google
         try:
             refresh_token = decrypt_token(account.encrypted_refresh_token)
             await asyncio.to_thread(_revoke_token_sync, refresh_token)
         except Exception:
-            # If revocation fails, still remove it from the database
             logger.warning(
                 "Could not revoke Google token for account %s, deactivating anyway.",
                 account_id,
@@ -434,30 +401,24 @@ class YouTubeManagementService:
     async def get_fresh_credentials(
         self, user_id: uuid.UUID, account_id: uuid.UUID
     ) -> Credentials:
-        """
-        Use this during video upload.
-        If the access token expires, it is automatically refreshed.
-        """
         account = await self._get_active_account(user_id, account_id)
+        client = await load_client(self._session, user_id)
 
         if account.needs_reconnect:
-            raise ValidationError(
-                "This YouTube account permission has expired. Please reconnect the account."
-            )
+            raise ValidationError(_RECONNECT_MESSAGE)
 
-        credentials = _credentials_from_account(account)
+        credentials = _credentials_from_account(account, client)
 
         refresh_deadline = utc_now() + timedelta(seconds=_TOKEN_REFRESH_SKEW_SECONDS)
         if ensure_utc(account.token_expires_at) <= refresh_deadline:
             try:
                 await asyncio.to_thread(_refresh_credentials_sync, credentials)
-            except RefreshError:
-                # Refresh token expired/revoked — the account list will show that reconnection is needed
+            except RefreshError as exc:
+                if _client_rejected(exc):
+                    raise GoogleCredentialsInvalidError() from exc
                 await yt_crud.mark_needs_reconnect(self._session, account)
                 await self._session.commit()
-                raise ValidationError(
-                    "This YouTube account permission has expired. Please reconnect the account."
-                )
+                raise ValidationError(_RECONNECT_MESSAGE)
             await yt_crud.update_account_tokens(
                 self._session,
                 account,

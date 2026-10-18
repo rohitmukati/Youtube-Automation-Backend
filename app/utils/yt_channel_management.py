@@ -79,7 +79,7 @@ class UploadInterrupted(Exception):
 QUOTA_EXCEEDED_FAILURE = UploadFailure(
     code="quota_exceeded",
     message=(
-        "The daily YouTube upload limit for this app has been reached. "
+        "The daily YouTube upload limit for your Google project has been reached. "
         "Retry after the limit resets at midnight Pacific Time."
     ),
     stop_all=True,

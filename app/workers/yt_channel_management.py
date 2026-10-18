@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app.core.database import SessionFactory
-from app.core.exceptions import AccountDisabledError, AppException, NotFoundError
+from app.core.exceptions import (
+    AccountDisabledError,
+    AppException,
+    GoogleCredentialsMissingError,
+    NotFoundError,
+)
 from app.crud import storage_bucket as storage_crud
 from app.crud import yt_channel_management as crud
 from app.integrations import youtube_api
@@ -159,7 +164,7 @@ class YtUploadWorker:
         if plan is None:
             raise UploadCancelled()
         credentials = await self._get_credentials(plan)
-        await self._reserve_quota()
+        await self._reserve_quota(plan.user_id)
         source_url = await self._sign(plan.source_path)
 
         loop = asyncio.get_running_loop()
@@ -240,6 +245,10 @@ class YtUploadWorker:
                 return await YouTubeManagementService(session).get_fresh_credentials(
                     plan.user_id, plan.account_id
                 )
+            except GoogleCredentialsMissingError as exc:
+                raise UploadFailureError(
+                    UploadFailure(code=exc.code, message=exc.message)
+                ) from exc
             except (NotFoundError, AccountDisabledError) as exc:
                 raise UploadFailureError(
                     UploadFailure(
@@ -258,10 +267,11 @@ class YtUploadWorker:
                     )
                 ) from exc
 
-    async def _reserve_quota(self) -> None:
+    async def _reserve_quota(self, user_id: uuid.UUID) -> None:
         async with self._session_factory() as session:
             allowed = await crud.try_reserve_quota(
                 session,
+                user_id=user_id,
                 day=quota_day(utc_now()),
                 limit=settings.yt_upload_daily_limit,
             )
@@ -391,9 +401,15 @@ class YtUploadWorker:
                     await crud.flag_account_needs_reconnect(session, target.account_id)
                 affected = {target.job_id}
                 if failure.stop_all:
-                    affected |= await crud.fail_waiting_targets(
-                        session, code=failure.code, message=failure.message, now=now
-                    )
+                    owner = await crud.get_job_by_id(session, target.job_id)
+                    if owner is not None:
+                        affected |= await crud.fail_waiting_targets(
+                            session,
+                            user_id=owner.user_id,
+                            code=failure.code,
+                            message=failure.message,
+                            now=now,
+                        )
                 for job_id in affected:
                     await crud.refresh_job_status(session, job_id)
                 await session.commit()

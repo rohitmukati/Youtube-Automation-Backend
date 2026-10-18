@@ -350,12 +350,15 @@ async def set_thumbnail_result(
 
 
 async def fail_waiting_targets(
-    session: AsyncSession, *, code: str, message: str, now: datetime
+    session: AsyncSession, *, user_id: uuid.UUID, code: str, message: str, now: datetime
 ) -> set[uuid.UUID]:
     rows = (
         await session.execute(
-            select(YtUploadTarget.id, YtUploadTarget.job_id).where(
-                YtUploadTarget.status.in_(WAITING_TARGET_STATUSES)
+            select(YtUploadTarget.id, YtUploadTarget.job_id)
+            .join(YtUploadJob, YtUploadJob.id == YtUploadTarget.job_id)
+            .where(
+                YtUploadJob.user_id == user_id,
+                YtUploadTarget.status.in_(WAITING_TARGET_STATUSES),
             )
         )
     ).all()
@@ -438,37 +441,53 @@ async def refresh_job_status(session: AsyncSession, job_id: uuid.UUID) -> Upload
     return new_status
 
 
-async def count_waiting_targets(session: AsyncSession) -> int:
+async def count_waiting_targets(session: AsyncSession, user_id: uuid.UUID) -> int:
     total = await session.scalar(
         select(func.count())
         .select_from(YtUploadTarget)
-        .where(YtUploadTarget.status.in_(WAITING_TARGET_STATUSES))
+        .join(YtUploadJob, YtUploadJob.id == YtUploadTarget.job_id)
+        .where(
+            YtUploadJob.user_id == user_id,
+            YtUploadTarget.status.in_(WAITING_TARGET_STATUSES),
+        )
     )
     return int(total or 0)
 
 
-async def get_quota_calls(session: AsyncSession, day: date) -> int:
-    calls = await session.scalar(select(YtUploadQuotaDay.calls).where(YtUploadQuotaDay.day == day))
+async def get_quota_calls(session: AsyncSession, user_id: uuid.UUID, day: date) -> int:
+    calls = await session.scalar(
+        select(YtUploadQuotaDay.calls).where(
+            YtUploadQuotaDay.user_id == user_id, YtUploadQuotaDay.day == day
+        )
+    )
     return int(calls or 0)
 
 
-async def try_reserve_quota(session: AsyncSession, *, day: date, limit: int) -> bool:
+async def try_reserve_quota(
+    session: AsyncSession, *, user_id: uuid.UUID, day: date, limit: int
+) -> bool:
     if limit <= 0:
         return False
     for _ in range(2):
         result = await session.execute(
             update(YtUploadQuotaDay)
-            .where(YtUploadQuotaDay.day == day, YtUploadQuotaDay.calls < limit)
+            .where(
+                YtUploadQuotaDay.user_id == user_id,
+                YtUploadQuotaDay.day == day,
+                YtUploadQuotaDay.calls < limit,
+            )
             .values(calls=YtUploadQuotaDay.calls + 1, updated_at=utc_now())
         )
         if (result.rowcount or 0) > 0:
             return True
         existing = await session.scalar(
-            select(YtUploadQuotaDay.day).where(YtUploadQuotaDay.day == day)
+            select(YtUploadQuotaDay.day).where(
+                YtUploadQuotaDay.user_id == user_id, YtUploadQuotaDay.day == day
+            )
         )
         if existing is not None:
             return False
-        session.add(YtUploadQuotaDay(day=day, calls=1, updated_at=utc_now()))
+        session.add(YtUploadQuotaDay(user_id=user_id, day=day, calls=1, updated_at=utc_now()))
         try:
             await session.flush()
             return True

@@ -9,7 +9,6 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = BASE_DIR / ".env"
 
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
@@ -18,7 +17,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── App ───────────────────────────────────────────────────────────
     app_name: ClassVar[str] = "Youtube Automation Backend"
     app_env: ClassVar[str] = "development"
     debug: ClassVar[bool] = True
@@ -31,34 +29,28 @@ class Settings(BaseSettings):
         "http://localhost:5173",
     ]
 
-    # ── Database ──────────────────────────────────────────────────────
     db_pool_size: ClassVar[int] = 5
     db_max_overflow: ClassVar[int] = 10
     db_auto_create_tables: ClassVar[bool] = True
 
-    # ── JWT ───────────────────────────────────────────────────────────
     jwt_algorithm: ClassVar[str] = "HS256"
     access_token_expire_minutes: ClassVar[int] = 30
     refresh_token_expire_days: ClassVar[int] = 7
 
-    # ── Password / OTP ────────────────────────────────────────────────
     password_min_length: ClassVar[int] = 8
     otp_length: ClassVar[int] = 6
     password_reset_otp_expire_minutes: ClassVar[int] = 10
     password_reset_otp_max_attempts: ClassVar[int] = 5
     password_reset_otp_resend_cooldown_seconds: ClassVar[int] = 60
 
-    # ── SMTP (non-secret defaults) ────────────────────────────────────
     smtp_host: ClassVar[str] = "smtp.gmail.com"
     smtp_port: ClassVar[int] = 587
     smtp_use_tls: ClassVar[bool] = True
     smtp_timeout_seconds: ClassVar[int] = 15
     smtp_from_name: ClassVar[str] = "Youtube Automation"
 
-    # ── Supabase ──────────────────────────────────────────────────────
     supabase_storage_bucket: ClassVar[str] = "artifacts"
 
-    # ── Storage Bucket ────────────────────────────────────────────────
     storage_signed_url_ttl_seconds: ClassVar[int] = 3600
     storage_request_timeout_seconds: ClassVar[int] = 30
     storage_upload_timeout_seconds: ClassVar[int] = 600
@@ -83,7 +75,6 @@ class Settings(BaseSettings):
     storage_list_default_limit: ClassVar[int] = 20
     storage_list_max_limit: ClassVar[int] = 100
 
-    # ── YouTube Channel Management (uploads) ──────────────────────────
     yt_upload_max_accounts: ClassVar[int] = 50
     yt_upload_max_attempts: ClassVar[int] = 3
     yt_upload_retry_delays_seconds: ClassVar[List[int]] = [30, 120]
@@ -115,8 +106,9 @@ class Settings(BaseSettings):
     yt_account_notes_max_length: ClassVar[int] = 500
     google_userinfo_url: ClassVar[str] = "https://www.googleapis.com/oauth2/v3/userinfo"
     google_userinfo_timeout_seconds: ClassVar[int] = 10
-
-    # ── Google / YouTube ──────────────────────────────────────────────
+    google_client_id_pattern: ClassVar[str] = r"^[A-Za-z0-9._-]{8,200}\.apps\.googleusercontent\.com$"
+    google_client_secret_min_length: ClassVar[int] = 8
+    google_client_secret_max_length: ClassVar[int] = 256
     google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"
     google_scopes: ClassVar[List[str]] = [
         "openid",
@@ -125,28 +117,16 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/youtube.readonly",
     ]
 
-    # ══════════════════════════════════════════════════════════════════
-    # Fields below come from .env  — these are the ONLY env vars needed
-    # ══════════════════════════════════════════════════════════════════
-
-    # Required
     database_url: SecretStr
     jwt_secret_key: SecretStr
 
-    # SMTP credentials
     smtp_username: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
 
-    # Supabase (optional until storage features are built)
     supabase_url: Optional[str] = None
     supabase_service_role_key: Optional[SecretStr] = None
 
-    # Google OAuth (optional until YouTube features are built)
-    google_client_id: Optional[str] = None
-    google_client_secret: Optional[SecretStr] = None
     token_encryption_key: Optional[SecretStr] = None
-
-    # ── Validators ────────────────────────────────────────────────────
 
     @field_validator("database_url")
     @classmethod
@@ -178,8 +158,6 @@ class Settings(BaseSettings):
             return value
         return SecretStr(value.get_secret_value().replace(" ", ""))
 
-    # ── Computed properties ───────────────────────────────────────────
-
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
@@ -196,7 +174,6 @@ class Settings(BaseSettings):
             and self.smtp_password.get_secret_value()
         )
 
-
 @lru_cache
 def get_settings() -> Settings:
     try:
@@ -211,6 +188,5 @@ def get_settings() -> Settings:
             "Please fix your .env file and restart the application. "
             "Details: " + " | ".join(problems)
         ) from exc
-
 
 settings = get_settings()

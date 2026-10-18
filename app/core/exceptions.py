@@ -91,6 +91,20 @@ class InvalidTokenError(AuthenticationError):
     message = "Your session is not valid. Please log in again."
 
 
+class GoogleCredentialsMissingError(BadRequestError):
+    code = "google_credentials_missing"
+    message = (
+        "Save your Google Client ID and Client Secret first, then connect or reconnect your channels."
+    )
+
+
+class GoogleCredentialsInvalidError(GoogleCredentialsMissingError):
+    code = "google_credentials_invalid"
+    message = (
+        "Google rejected your saved Client ID or Client Secret. Save the correct values and try again."
+    )
+
+
 class AccountDisabledError(PermissionDeniedError):
     code = "account_disabled"
     message = "Your account has been disabled. Please contact support."

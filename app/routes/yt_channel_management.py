@@ -48,7 +48,7 @@ async def get_quota(
     current_user: CurrentUser,
     session: DbSession,
 ) -> UploadQuotaResponse:
-    return await YtChannelManagementService(session).get_quota()
+    return await YtChannelManagementService(session).get_quota(current_user.id)
 
 
 @router.get(

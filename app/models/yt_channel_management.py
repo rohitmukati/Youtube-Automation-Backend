@@ -138,6 +138,11 @@ class YtUploadTarget(TimestampMixin, Base):
 class YtUploadQuotaDay(Base):
     __tablename__ = "yt_upload_quota_days"
 
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(

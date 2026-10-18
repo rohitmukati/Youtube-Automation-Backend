@@ -1,6 +1,7 @@
 # app/models/__init__.py
 from app.models.auth import PasswordResetOtp, RefreshToken, User
 from app.models.base import Base
+from app.models.google_credentials import GoogleCredential
 from app.models.storage_bucket import StorageFile, StorageFileTag
 from app.models.yt_channel_management import (
     YtUploadJob,
@@ -14,6 +15,7 @@ __all__ = [
     "YtUploadQuotaDay",
     "YtUploadTarget",
     "Base",
+    "GoogleCredential",
     "PasswordResetOtp",
     "RefreshToken",
     "User",

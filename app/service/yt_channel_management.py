@@ -12,6 +12,7 @@ from app.crud import storage_bucket as storage_crud
 from app.crud import yt_channel_management as crud
 from app.models.storage_bucket import StorageFile, StorageFileType
 from app.models.yt_channel_management import YtUploadJob, YtUploadTarget
+from app.service.google_credentials import ensure_configured
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
     UploadChannelBrief,
@@ -108,10 +109,11 @@ class YtChannelManagementService:
     async def create_upload(
         self, user_id: uuid.UUID, payload: CreateUploadRequest
     ) -> UploadJobDetail:
+        await ensure_configured(self._session, user_id)
         source = await self._get_video(user_id, payload.storage_file_id)
         thumbnail = await self._get_thumbnail(user_id, payload.thumbnail_file_id)
         accounts = await self._get_uploadable_accounts(user_id, payload.account_ids)
-        await self._ensure_quota(len(accounts))
+        await self._ensure_quota(user_id, len(accounts))
 
         job = await crud.create_job(
             self._session,
@@ -185,6 +187,7 @@ class YtChannelManagementService:
         return _to_detail(job, await self._load_emails([job]))
 
     async def retry_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
+        await ensure_configured(self._session, user_id)
         job = await self._get_job(user_id, job_id)
         failed = [
             target
@@ -215,7 +218,7 @@ class YtChannelManagementService:
             raise ValidationError(
                 "The failed channels need to be reconnected before they can be retried."
             )
-        await self._ensure_quota(len(retryable))
+        await self._ensure_quota(user_id, len(retryable))
 
         await crud.reset_targets(
             self._session,
@@ -241,10 +244,10 @@ class YtChannelManagementService:
         fresh = await self._get_job(user_id, job_id)
         return _to_detail(fresh, await self._load_emails([fresh]))
 
-    async def get_quota(self) -> UploadQuotaResponse:
+    async def get_quota(self, user_id: uuid.UUID) -> UploadQuotaResponse:
         now = utc_now()
-        used = await crud.get_quota_calls(self._session, quota_day(now))
-        waiting = await crud.count_waiting_targets(self._session)
+        used = await crud.get_quota_calls(self._session, user_id, quota_day(now))
+        waiting = await crud.count_waiting_targets(self._session, user_id)
         limit = settings.yt_upload_daily_limit
         return UploadQuotaResponse(
             daily_limit=limit,
@@ -307,11 +310,11 @@ class YtChannelManagementService:
             )
         return accounts
 
-    async def _ensure_quota(self, needed: int) -> None:
-        quota = await self.get_quota()
+    async def _ensure_quota(self, user_id: uuid.UUID, needed: int) -> None:
+        quota = await self.get_quota(user_id)
         if needed > quota.remaining:
             raise ValidationError(
-                f"Only {quota.remaining} uploads are left for today "
+                f"Only {quota.remaining} uploads are left for today in your Google project "
                 f"(daily limit {quota.daily_limit}). Select fewer channels or try again "
                 "after the limit resets at midnight Pacific Time."
             )
