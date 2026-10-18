@@ -47,7 +47,7 @@ async def delete_oauth_state(session: AsyncSession, state_token: str) -> None:
 
 
 async def cleanup_expired_oauth_states(session: AsyncSession) -> None:
-    """Purane expire ho chuke states delete karo. Startup ya periodic task mein call karo."""
+    """Delete expired states. Call this during startup or from a periodic task."""
     await session.execute(
         delete(OAuthState).where(OAuthState.expires_at <= utc_now())
     )
@@ -100,7 +100,7 @@ async def get_accounts_by_user(
 async def get_account_by_id(
     session: AsyncSession, account_id: uuid.UUID, user_id: uuid.UUID
 ) -> Optional[YouTubeAccount]:
-    """Sirf us user ka account return karo — dusre user ke accounts nahi."""
+    """Return only the account belonging to the current user."""
     result = await session.execute(
         select(YouTubeAccount).where(
             YouTubeAccount.id == account_id,
@@ -113,7 +113,7 @@ async def get_account_by_id(
 async def get_account_by_channel_id(
     session: AsyncSession, user_id: uuid.UUID, channel_id: str
 ) -> Optional[YouTubeAccount]:
-    """Check karo ki same channel already connected hai ya nahi."""
+    """Check whether the same channel is already connected."""
     result = await session.execute(
         select(YouTubeAccount).where(
             YouTubeAccount.user_id == user_id,
@@ -130,7 +130,7 @@ async def update_account_tokens(
     encrypted_access_token: str,
     token_expires_at: datetime,
 ) -> YouTubeAccount:
-    """Access token refresh hone par update karo."""
+    """Update the access token after it has been refreshed."""
     account.encrypted_access_token = encrypted_access_token
     account.token_expires_at = token_expires_at
     account.last_used_at = utc_now()
@@ -221,8 +221,8 @@ async def deactivate_account(
     session: AsyncSession, account: YouTubeAccount
 ) -> None:
     """
-    Disconnect = tokens clear karo + is_active = False.
-    Row rakhte hain audit ke liye; hard delete nahi karte.
+    Disconnect = clear tokens and set is_active = False.
+    The row is kept for audit purposes; it is not hard-deleted.
     """
     account.is_active = False
     account.needs_reconnect = False

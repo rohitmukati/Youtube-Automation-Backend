@@ -11,16 +11,16 @@ from app.config import settings
 # ── Request Schemas ───────────────────────────────────────────────────
 
 class ConnectAccountRequest(BaseModel):
-    """User YouTube account connect karne se pehle sirf nickname deta hai."""
+    """Before connecting a YouTube account, the user provides only the nickname."""
     nickname: str = Field(
         min_length=1,
         max_length=100,
-        description="Apne YouTube account ko ek naam do, e.g. 'Gaming Channel'",
+        description="Give your YouTube account a name, e.g. 'Gaming Channel'",
     )
 
 
 class UpdateAccountRequest(BaseModel):
-    """Connected account ka nickname aur/ya notes badalna. Notes khali bhejne par hat jaate hain."""
+    """Updates the connected account's nickname and/or notes. Empty notes are removed when sent."""
     nickname: Optional[str] = Field(default=None, min_length=1, max_length=100)
     notes: Optional[str] = None
 
@@ -57,15 +57,15 @@ class UpdateAccountRequest(BaseModel):
 
 class ConnectInitiateResponse(BaseModel):
     """
-    Frontend is URL par user ko redirect karega.
-    Google consent screen khulega.
+    The frontend redirects the user to this URL.
+    The Google consent screen opens.
     """
     auth_url: str
-    message: str = "Is URL par jaake apna YouTube account connect karo."
+    message: str = "Visit this URL to connect your YouTube account."
 
 
 class YouTubeAccountResponse(BaseModel):
-    """Connected YouTube account ki public info."""
+    """Public information for the connected YouTube account."""
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -82,13 +82,13 @@ class YouTubeAccountResponse(BaseModel):
 
 
 class AccountListResponse(BaseModel):
-    """User ke saare connected accounts."""
+    """All connected accounts for the user."""
     accounts: list[YouTubeAccountResponse]
     total: int
 
 
 class ConnectSuccessResponse(BaseModel):
-    """OAuth callback ke baad success response."""
+    """Success response after the OAuth callback."""
     message: str
     account: YouTubeAccountResponse
 

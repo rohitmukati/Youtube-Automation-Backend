@@ -34,11 +34,11 @@ def _frontend_redirect(**params: str) -> RedirectResponse:
 @router.post(
     "/connect",
     response_model=ConnectInitiateResponse,
-    summary="Step 1 — YouTube account connect karo",
+    summary="Step 1 — Connect a YouTube account",
     description=(
-        "Apne YouTube account ko ek nickname do. "
-        "Response mein Google OAuth URL milega — "
-        "frontend us URL par user ko redirect kare."
+        "Give your YouTube account a nickname. "
+        "The response contains a Google OAuth URL — "
+        "the frontend redirects the user to that URL."
     ),
 )
 async def initiate_connect(
@@ -54,10 +54,10 @@ async def initiate_connect(
 
 @router.get(
     "/callback",
-    summary="Step 2 — Google OAuth callback (Google is URL par redirect karta hai)",
+    summary="Step 2 — Google OAuth callback",
     description=(
-        "Yeh endpoint sirf Google use karta hai. "
-        "Frontend yahan directly hit nahi karta."
+        "This endpoint is used only by Google. "
+        "The frontend does not call it directly."
     ),
 )
 async def oauth_callback(
@@ -67,9 +67,9 @@ async def oauth_callback(
     error: Optional[str] = Query(default=None),
 ):
     """
-    Google callback ke 2 possible outcomes:
-    - Success → frontend ke success page par redirect
-    - Failure → frontend ke error page par redirect
+    Google callback has two possible outcomes:
+    - Success → redirect to the frontend success page
+    - Failure → redirect to the frontend error page
     """
     if error or not code or not state:
         return _frontend_redirect(status="error", reason=error or "missing_params")
@@ -99,7 +99,7 @@ async def oauth_callback(
 @router.get(
     "/accounts",
     response_model=AccountListResponse,
-    summary="Saare connected YouTube accounts dekho",
+    summary="View all connected YouTube accounts",
 )
 async def list_accounts(
     current_user: CurrentUser,
@@ -111,10 +111,10 @@ async def list_accounts(
 @router.post(
     "/accounts/refresh",
     response_model=AccountListResponse,
-    summary="Saare accounts ki email, channel name aur photo Google se refresh karo",
+    summary="Refresh all accounts' email, channel name, and photo from Google",
     description=(
-        "Purane connected accounts mein Google email abhi saved nahi hai. "
-        "Ye call ek baar chalane se sab accounts ki email bhar jaati hai."
+        "Older connected accounts may not have their Google email saved yet. "
+        "Running this once fills in the email for all accounts."
     ),
 )
 async def refresh_all_accounts(
@@ -127,7 +127,7 @@ async def refresh_all_accounts(
 @router.post(
     "/accounts/{account_id}/refresh",
     response_model=YouTubeAccountResponse,
-    summary="Ek account ki email, channel name aur photo Google se refresh karo",
+    summary="Refresh a single account's email, channel name, and photo from Google",
 )
 async def refresh_account(
     account_id: uuid.UUID,
@@ -143,10 +143,10 @@ async def refresh_account(
 @router.patch(
     "/accounts/{account_id}",
     response_model=YouTubeAccountResponse,
-    summary="Account ka nickname ya notes badlo",
+    summary="Update an account's nickname or notes",
     description=(
-        "nickname aur notes mein se jo bhejoge wahi badlega. "
-        "Notes 500 characters tak ho sakte hain. Notes ko null ya khali bhejne par hat jaate hain."
+        "Only the fields you send will be updated. "
+        "Notes can be up to 500 characters. Sending null or blank notes removes them."
     ),
 )
 async def update_account(
@@ -168,7 +168,7 @@ async def update_account(
     "/accounts/{account_id}",
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="YouTube account disconnect karo",
+    summary="Disconnect a YouTube account",
 )
 async def disconnect_account(
     account_id: uuid.UUID,
@@ -179,4 +179,4 @@ async def disconnect_account(
         user_id=current_user.id,
         account_id=account_id,
     )
-    return MessageResponse(message="YouTube account successfully disconnect ho gaya.")
+    return MessageResponse(message="YouTube account disconnected successfully.")

@@ -12,9 +12,9 @@ from app.utils.datetime_utils import utc_now
 
 class YouTubeAccount(TimestampMixin, Base):
     """
-    Ek user ke connected YouTube accounts store karta hai.
-    Ek user ke paas unlimited accounts ho sakte hain.
-    OAuth tokens encrypted form mein store hote hain.
+    Stores a user's connected YouTube accounts.
+    A user can have unlimited accounts.
+    OAuth tokens are stored in encrypted form.
     """
     __tablename__ = "youtube_accounts"
     __table_args__ = (
@@ -70,9 +70,9 @@ class YouTubeAccount(TimestampMixin, Base):
 
 class OAuthState(Base):
     """
-    OAuth flow ke dauran state token temporarily store karta hai.
-    Callback par verify hone ke baad delete ho jaata hai.
-    Expires_at se stale states auto-cleanup ho jaate hain.
+    Temporarily stores the OAuth state token during the flow.
+    It is deleted after verification on the callback.
+    Stale states are auto-cleaned up using expires_at.
     """
     __tablename__ = "oauth_states"
 

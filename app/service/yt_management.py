@@ -36,10 +36,10 @@ from app.utils.token_encryption import decrypt_token, encrypt_token
 
 logger = logging.getLogger(__name__)
 
-# OAuth state valid rehta hai sirf 10 minute
+# OAuth state is valid for 10 minutes only
 _OAUTH_STATE_TTL_MINUTES = 10
 
-# Access token expire hone se thoda pehle hi refresh kar lo
+# Refresh the access token slightly before it expires
 _TOKEN_REFRESH_SKEW_SECONDS = 60
 
 _REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -47,8 +47,8 @@ _REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 def _build_flow() -> Flow:
     """
-    Google OAuth flow banata hai.
-    CLIENT_SECRETS file nahi chahiye — directly client_id/secret use karte hain.
+    Builds a Google OAuth flow.
+    A CLIENT_SECRETS file is not required — we use client_id/secret directly.
     """
     client_config = {
         "web": {
@@ -69,7 +69,7 @@ def _build_flow() -> Flow:
 
 
 def _credentials_from_account(account: YouTubeAccount) -> Credentials:
-    """DB se decrypted credentials banata hai."""
+    """Builds decrypted credentials from the database."""
     return Credentials(
         token=decrypt_token(account.encrypted_access_token),
         refresh_token=decrypt_token(account.encrypted_refresh_token),
@@ -94,14 +94,14 @@ def _exchange_code_sync(code: str) -> Credentials:
 
 def _fetch_channel_info_sync(credentials: Credentials) -> dict:
     """
-    YouTube API se channel ki basic info fetch karta hai.
+    Fetches the basic channel information from the YouTube API.
     Returns: {channel_id, channel_title, thumbnail_url}
     """
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
     response = youtube.channels().list(part="snippet", mine=True).execute()
     items = response.get("items", [])
     if not items:
-        raise ValidationError("Is Google account ke saath koi YouTube channel linked nahi hai.")
+        raise ValidationError("This Google account is not linked to any YouTube channel.")
 
     channel = items[0]
     snippet = channel.get("snippet", {})
@@ -157,31 +157,31 @@ class YouTubeManagementService:
     def _check_google_configured(self) -> None:
         if not settings.google_client_id or not settings.google_client_secret:
             raise ValidationError(
-                "Google OAuth credentials configure nahi hain. "
-                ".env mein GOOGLE_CLIENT_ID aur GOOGLE_CLIENT_SECRET set karo."
+                "Google OAuth credentials are not configured. "
+                "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the .env file."
             )
         if not settings.token_encryption_key:
             raise ValidationError(
-                "TOKEN_ENCRYPTION_KEY .env mein set nahi hai. "
-                "Tokens encrypt karne ke liye yeh zaruri hai."
+                "TOKEN_ENCRYPTION_KEY is not set in the .env file. "
+                "This is required to encrypt tokens."
             )
 
     async def initiate_connect(
         self, user_id: uuid.UUID, nickname: str
     ) -> ConnectInitiateResponse:
         """
-        Step 1: User nickname deta hai → Google OAuth URL generate hota hai.
-        Frontend is URL par user ko redirect karega.
+        Step 1: the user provides a nickname → a Google OAuth URL is generated.
+        The frontend redirects the user to this URL.
         """
         self._check_google_configured()
 
-        # Purane expire states hata do
+        # Remove expired states
         await yt_crud.cleanup_expired_oauth_states(self._session)
 
-        # Ek random state token banao (CSRF protection)
+        # Create a random state token (CSRF protection)
         state_token = secrets.token_urlsafe(32)
 
-        # State DB mein save karo (10 min valid)
+        # Save the state in the database (valid for 10 minutes)
         await yt_crud.create_oauth_state(
             self._session,
             state_token=state_token,
@@ -191,12 +191,12 @@ class YouTubeManagementService:
         )
         await self._session.commit()
 
-        # Google OAuth URL banao
+        # Build the Google OAuth URL
         flow = _build_flow()
         auth_url, _ = flow.authorization_url(
-            access_type="offline",  # Refresh token milega
-            # select_account: har baar account chooser dikhao, taaki alag Gmail chuna ja sake
-            # consent: har baar consent maango (naya refresh token)
+            access_type="offline",  # A refresh token will be provided
+            # select_account: show the account chooser each time so the user can choose a different Gmail account
+            # consent: request consent each time (new refresh token)
             prompt="select_account consent",
             include_granted_scopes="false",
             state=state_token,
@@ -212,34 +212,34 @@ class YouTubeManagementService:
         error: Optional[str] = None,
     ) -> ConnectSuccessResponse:
         """
-        Step 2: Google callback par code + state aata hai.
-        Tokens exchange karo, channel info fetch karo, DB mein save karo.
+        Step 2: Google sends the code + state on callback.
+        Exchange tokens, fetch channel info, and save it to the database.
         """
         self._check_google_configured()
 
-        # User ne permission deny ki?
+        # Did the user deny permission?
         if error:
-            raise ValidationError(f"Google ne permission deny ki: {error}")
+            raise ValidationError(f"Google denied permission: {error}")
 
-        # State verify karo (CSRF check)
+        # Verify the state (CSRF check)
         state_record = await yt_crud.get_oauth_state(self._session, state_token)
         if state_record is None:
-            raise ValidationError("Invalid ya expired OAuth state. Dobara try karo.")
+            raise ValidationError("Invalid or expired OAuth state. Please try again.")
 
         if ensure_utc(state_record.expires_at) <= utc_now():
             await yt_crud.delete_oauth_state(self._session, state_token)
             await self._session.commit()
-            raise ValidationError("OAuth session expire ho gaya (10 min). Phir se connect karo.")
+            raise ValidationError("The OAuth session expired (10 minutes). Please connect again.")
 
         user_id = state_record.user_id
         nickname = state_record.nickname
 
-        # State single-use hai: aage kuch fail ho tab bhi dobara use nahi hona chahiye
+        # The state is single-use: it should not be used again even if something fails later
         await yt_crud.delete_oauth_state(self._session, state_token)
         await self._session.commit()
 
         try:
-            # Google ke calls blocking hain, isliye thread mein chalate hain
+            # Google calls are blocking, so run them in a thread
             credentials = await asyncio.to_thread(_exchange_code_sync, code)
             channel_info = await asyncio.to_thread(_fetch_channel_info_sync, credentials)
         except AppException:
@@ -247,7 +247,7 @@ class YouTubeManagementService:
         except Exception:
             logger.exception("Google OAuth callback failed for user %s", user_id)
             raise ValidationError(
-                "Google account connect nahi ho paaya. Kripya dobara try karo."
+                "The Google account could not be connected. Please try again."
             )
 
         google_email = await asyncio.to_thread(_fetch_email_sync, credentials)
@@ -271,12 +271,11 @@ class YouTubeManagementService:
                 refresh_token = decrypt_token(existing.encrypted_refresh_token)
         if not refresh_token:
             raise ValidationError(
-                "Google ne offline access nahi diya. Google account settings se is app ka "
-                "access hata kar dobara connect karo."
+                "Google did not grant offline access. Remove this app in your Google account settings and connect again."
             )
 
         if existing is not None:
-            # Re-connect = tokens, scopes aur channel info sab refresh karo
+            # Reconnect = refresh tokens, scopes, and channel info
             logger.info(
                 "Re-connecting existing channel %s for user %s", channel_id, user_id
             )
@@ -298,7 +297,7 @@ class YouTubeManagementService:
                 account=YouTubeAccountResponse.model_validate(existing),
             )
 
-        # Naya account save karo
+        # Save the new account
         try:
             account = await yt_crud.create_youtube_account(
                 self._session,
@@ -317,7 +316,7 @@ class YouTubeManagementService:
         except IntegrityError:
             await self._session.rollback()
             raise ConflictError(
-                "Yeh channel pehle se connect ho chuka hai. Page refresh karke dekho."
+                "This channel is already connected. Refresh the page and check again."
             )
 
         logger.info(
@@ -330,8 +329,8 @@ class YouTubeManagementService:
 
     async def list_accounts(self, user_id: uuid.UUID) -> AccountListResponse:
         """
-        User ke saare connected YouTube accounts.
-        Jin accounts ko reconnect chahiye unme needs_reconnect = True aata hai.
+        All connected YouTube accounts for the user.
+        Accounts that need reconnection have needs_reconnect = True.
         """
         accounts = await yt_crud.get_accounts_by_user(self._session, user_id)
         active = [a for a in accounts if a.is_active]
@@ -411,18 +410,18 @@ class YouTubeManagementService:
         self, user_id: uuid.UUID, account_id: uuid.UUID
     ) -> None:
         """
-        Account disconnect karo:
-        1. Google par token revoke karo
-        2. DB mein tokens clear karo, is_active = False
+        Disconnect the account:
+        1. Revoke the token on Google
+        2. Clear the tokens in the DB and set is_active = False
         """
         account = await self._get_active_account(user_id, account_id)
 
-        # Google par refresh token revoke karne ki koshish karo
+        # Try to revoke the refresh token on Google
         try:
             refresh_token = decrypt_token(account.encrypted_refresh_token)
             await asyncio.to_thread(_revoke_token_sync, refresh_token)
         except Exception:
-            # Revoke fail ho toh bhi DB se hata do
+            # If revocation fails, still remove it from the database
             logger.warning(
                 "Could not revoke Google token for account %s, deactivating anyway.",
                 account_id,
@@ -436,14 +435,14 @@ class YouTubeManagementService:
         self, user_id: uuid.UUID, account_id: uuid.UUID
     ) -> Credentials:
         """
-        Video upload ke time use karo.
-        Agar access token expire ho gaya hai toh automatically refresh karta hai.
+        Use this during video upload.
+        If the access token expires, it is automatically refreshed.
         """
         account = await self._get_active_account(user_id, account_id)
 
         if account.needs_reconnect:
             raise ValidationError(
-                "YouTube account ki permission expire ho gayi hai. Kripya account dobara connect karo."
+                "This YouTube account permission has expired. Please reconnect the account."
             )
 
         credentials = _credentials_from_account(account)
@@ -453,11 +452,11 @@ class YouTubeManagementService:
             try:
                 await asyncio.to_thread(_refresh_credentials_sync, credentials)
             except RefreshError:
-                # Refresh token expire/revoked — account list mein "reconnect needed" dikhega
+                # Refresh token expired/revoked — the account list will show that reconnection is needed
                 await yt_crud.mark_needs_reconnect(self._session, account)
                 await self._session.commit()
                 raise ValidationError(
-                    "YouTube account ki permission expire ho gayi. Kripya account dobara connect karo."
+                    "This YouTube account permission has expired. Please reconnect the account."
                 )
             await yt_crud.update_account_tokens(
                 self._session,
@@ -476,9 +475,9 @@ class YouTubeManagementService:
             self._session, account_id, user_id
         )
         if account is None:
-            raise NotFoundError("YouTube account nahi mila.")
+            raise NotFoundError("YouTube account not found.")
         if not account.is_active:
             raise AccountDisabledError(
-                "Yeh YouTube account disconnect ho chuka hai. Dobara connect karo."
+                "This YouTube account has been disconnected. Please connect it again."
             )
         return account
