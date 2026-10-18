@@ -1,3 +1,4 @@
+# app/routes/yt_management.py
 import logging
 import uuid
 from typing import Optional
@@ -15,7 +16,7 @@ from app.schemas.yt_management import (
     ConnectInitiateResponse,
     ConnectSuccessResponse,
     MessageResponse,
-    RenameAccountRequest,
+    UpdateAccountRequest,
     YouTubeAccountResponse,
 )
 from app.service.yt_management import YouTubeManagementService
@@ -107,21 +108,59 @@ async def list_accounts(
     return await YouTubeManagementService(session).list_accounts(current_user.id)
 
 
-@router.patch(
-    "/accounts/{account_id}",
-    response_model=YouTubeAccountResponse,
-    summary="Account ka nickname badlo",
+@router.post(
+    "/accounts/refresh",
+    response_model=AccountListResponse,
+    summary="Saare accounts ki email, channel name aur photo Google se refresh karo",
+    description=(
+        "Purane connected accounts mein Google email abhi saved nahi hai. "
+        "Ye call ek baar chalane se sab accounts ki email bhar jaati hai."
+    ),
 )
-async def rename_account(
+async def refresh_all_accounts(
+    current_user: CurrentUser,
+    session: DbSession,
+) -> AccountListResponse:
+    return await YouTubeManagementService(session).refresh_all_accounts(current_user.id)
+
+
+@router.post(
+    "/accounts/{account_id}/refresh",
+    response_model=YouTubeAccountResponse,
+    summary="Ek account ki email, channel name aur photo Google se refresh karo",
+)
+async def refresh_account(
     account_id: uuid.UUID,
-    payload: RenameAccountRequest,
     current_user: CurrentUser,
     session: DbSession,
 ) -> YouTubeAccountResponse:
-    return await YouTubeManagementService(session).rename_account(
+    return await YouTubeManagementService(session).refresh_account(
+        user_id=current_user.id,
+        account_id=account_id,
+    )
+
+
+@router.patch(
+    "/accounts/{account_id}",
+    response_model=YouTubeAccountResponse,
+    summary="Account ka nickname ya notes badlo",
+    description=(
+        "nickname aur notes mein se jo bhejoge wahi badlega. "
+        "Notes 500 characters tak ho sakte hain. Notes ko null ya khali bhejne par hat jaate hain."
+    ),
+)
+async def update_account(
+    account_id: uuid.UUID,
+    payload: UpdateAccountRequest,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> YouTubeAccountResponse:
+    return await YouTubeManagementService(session).update_account(
         user_id=current_user.id,
         account_id=account_id,
         nickname=payload.nickname,
+        notes=payload.notes,
+        update_notes="notes" in payload.model_fields_set,
     )
 
 

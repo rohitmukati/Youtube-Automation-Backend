@@ -1,3 +1,4 @@
+# app/models/yt_management.py
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -41,6 +42,12 @@ class YouTubeAccount(TimestampMixin, Base):
     channel_thumbnail_url: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
     )
+
+    # Google account email that owns this channel (from OpenID userinfo)
+    google_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+
+    # Free text note written by the user, up to 500 characters
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # Encrypted with Fernet (TOKEN_ENCRYPTION_KEY)
     encrypted_access_token: Mapped[str] = mapped_column(Text, nullable=False)

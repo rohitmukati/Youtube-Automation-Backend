@@ -1,3 +1,4 @@
+# app/service/yt_management.py
 import asyncio
 import logging
 import secrets
@@ -116,6 +117,29 @@ def _fetch_channel_info_sync(credentials: Credentials) -> dict:
     }
 
 
+def _fetch_email_sync(credentials: Credentials) -> Optional[str]:
+    try:
+        response = requests.get(
+            settings.google_userinfo_url,
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            timeout=settings.google_userinfo_timeout_seconds,
+        )
+        if response.status_code != 200:
+            logger.warning("Google userinfo returned status %s", response.status_code)
+            return None
+        email = response.json().get("email")
+        return email.strip().lower() if isinstance(email, str) and email.strip() else None
+    except (requests.RequestException, ValueError):
+        logger.warning("Could not read the Google account email", exc_info=True)
+        return None
+
+
+def _fetch_profile_sync(credentials: Credentials) -> dict:
+    info = _fetch_channel_info_sync(credentials)
+    info["email"] = _fetch_email_sync(credentials)
+    return info
+
+
 def _refresh_credentials_sync(credentials: Credentials) -> None:
     credentials.refresh(Request())
 
@@ -226,6 +250,8 @@ class YouTubeManagementService:
                 "Google account connect nahi ho paaya. Kripya dobara try karo."
             )
 
+        google_email = await asyncio.to_thread(_fetch_email_sync, credentials)
+
         channel_id = channel_info["channel_id"]
         token_expires_at = _expiry_of(credentials)
         scopes = " ".join(credentials.scopes or settings.google_scopes)
@@ -264,6 +290,7 @@ class YouTubeManagementService:
                 encrypted_refresh_token=encrypt_token(refresh_token),
                 token_expires_at=token_expires_at,
                 scopes=scopes,
+                google_email=google_email,
             )
             await self._session.commit()
             return ConnectSuccessResponse(
@@ -284,6 +311,7 @@ class YouTubeManagementService:
                 encrypted_refresh_token=encrypt_token(refresh_token),
                 token_expires_at=token_expires_at,
                 scopes=scopes,
+                google_email=google_email,
             )
             await self._session.commit()
         except IntegrityError:
@@ -312,15 +340,72 @@ class YouTubeManagementService:
             total=len(active),
         )
 
-    async def rename_account(
-        self, user_id: uuid.UUID, account_id: uuid.UUID, nickname: str
+    async def update_account(
+        self,
+        user_id: uuid.UUID,
+        account_id: uuid.UUID,
+        *,
+        nickname: Optional[str],
+        notes: Optional[str],
+        update_notes: bool,
     ) -> YouTubeAccountResponse:
         account = await self._get_active_account(user_id, account_id)
-        updated = await yt_crud.update_account_nickname(
-            self._session, account, nickname
+        updated = await yt_crud.update_account_details(
+            self._session,
+            account,
+            nickname=nickname,
+            notes=notes,
+            update_notes=update_notes,
         )
         await self._session.commit()
         return YouTubeAccountResponse.model_validate(updated)
+
+    async def refresh_account(
+        self, user_id: uuid.UUID, account_id: uuid.UUID
+    ) -> YouTubeAccountResponse:
+        account = await self._get_active_account(user_id, account_id)
+        if account.needs_reconnect:
+            raise ValidationError(
+                "This channel needs to be reconnected before its details can be refreshed."
+            )
+        if not await self._refresh_profile(user_id, account):
+            raise ValidationError(
+                "The details of this channel could not be refreshed right now. Please try again."
+            )
+        return YouTubeAccountResponse.model_validate(account)
+
+    async def refresh_all_accounts(self, user_id: uuid.UUID) -> AccountListResponse:
+        accounts = await yt_crud.get_accounts_by_user(self._session, user_id)
+        active = [a for a in accounts if a.is_active]
+        for account in active:
+            if not account.needs_reconnect:
+                await self._refresh_profile(user_id, account)
+        return AccountListResponse(
+            accounts=[YouTubeAccountResponse.model_validate(a) for a in active],
+            total=len(active),
+        )
+
+    async def _refresh_profile(self, user_id: uuid.UUID, account: YouTubeAccount) -> bool:
+        try:
+            credentials = await self.get_fresh_credentials(user_id, account.id)
+            profile = await asyncio.to_thread(_fetch_profile_sync, credentials)
+        except AppException:
+            logger.warning("Could not refresh the details of account %s", account.id)
+            return False
+        except Exception:
+            logger.exception("Refreshing the details of account %s failed", account.id)
+            return False
+
+        same_channel = profile["channel_id"] == account.channel_id
+        await yt_crud.update_account_profile(
+            self._session,
+            account,
+            google_email=profile.get("email"),
+            channel_title=profile["channel_title"] if same_channel else None,
+            channel_thumbnail_url=profile.get("thumbnail_url") if same_channel else None,
+        )
+        await self._session.commit()
+        return True
 
     async def disconnect_account(
         self, user_id: uuid.UUID, account_id: uuid.UUID

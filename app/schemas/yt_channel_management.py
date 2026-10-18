@@ -82,6 +82,7 @@ class UploadTargetResponse(BaseModel):
     id: uuid.UUID
     account_id: Optional[uuid.UUID] = None
     account_nickname: str
+    account_email: Optional[str] = None
     channel_id: str
     channel_title: str
     status: UploadTargetStatus
@@ -130,8 +131,21 @@ class UploadJobDetail(UploadJobSummary):
     targets: list[UploadTargetResponse]
 
 
+class UploadChannelBrief(BaseModel):
+    account_id: Optional[uuid.UUID] = None
+    account_nickname: str
+    account_email: Optional[str] = None
+    channel_title: str
+    status: UploadTargetStatus
+    youtube_url: Optional[str] = None
+
+
+class UploadJobListItem(UploadJobSummary):
+    channels: list[UploadChannelBrief]
+
+
 class UploadJobListResponse(BaseModel):
-    jobs: list[UploadJobSummary]
+    jobs: list[UploadJobListItem]
     total: int
     limit: int
     offset: int

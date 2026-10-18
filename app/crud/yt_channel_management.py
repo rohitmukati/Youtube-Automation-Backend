@@ -177,6 +177,19 @@ async def get_accounts_by_ids(
     return {account.id: account for account in result.scalars().all()}
 
 
+async def get_account_emails(
+    session: AsyncSession, account_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, Optional[str]]:
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(YouTubeAccount.id, YouTubeAccount.google_email).where(
+            YouTubeAccount.id.in_(list(account_ids))
+        )
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
 async def get_target(session: AsyncSession, target_id: uuid.UUID) -> Optional[YtUploadTarget]:
     result = await session.execute(
         select(YtUploadTarget)

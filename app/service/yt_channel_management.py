@@ -11,12 +11,13 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.crud import storage_bucket as storage_crud
 from app.crud import yt_channel_management as crud
 from app.models.storage_bucket import StorageFile, StorageFileType
-from app.models.yt_channel_management import YtUploadJob
+from app.models.yt_channel_management import YtUploadJob, YtUploadTarget
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
+    UploadChannelBrief,
     UploadJobDetail,
+    UploadJobListItem,
     UploadJobListResponse,
-    UploadJobSummary,
     UploadQuotaResponse,
     UploadTargetResponse,
 )
@@ -54,11 +55,36 @@ def _summary_data(job: YtUploadJob) -> dict:
     }
 
 
-def _to_summary(job: YtUploadJob) -> UploadJobSummary:
-    return UploadJobSummary(**_summary_data(job))
+def _to_list_item(
+    job: YtUploadJob, emails: dict[uuid.UUID, Optional[str]]
+) -> UploadJobListItem:
+    return UploadJobListItem(
+        **_summary_data(job),
+        channels=[
+            UploadChannelBrief(
+                account_id=target.account_id,
+                account_nickname=target.account_nickname,
+                account_email=emails.get(target.account_id),
+                channel_title=target.channel_title,
+                status=target.status,
+                youtube_url=target.youtube_url,
+            )
+            for target in job.targets
+        ],
+    )
 
 
-def _to_detail(job: YtUploadJob) -> UploadJobDetail:
+def _to_target(
+    target: YtUploadTarget, emails: dict[uuid.UUID, Optional[str]]
+) -> UploadTargetResponse:
+    response = UploadTargetResponse.model_validate(target)
+    response.account_email = emails.get(target.account_id)
+    return response
+
+
+def _to_detail(
+    job: YtUploadJob, emails: dict[uuid.UUID, Optional[str]]
+) -> UploadJobDetail:
     return UploadJobDetail(
         **_summary_data(job),
         description=job.description,
@@ -71,7 +97,7 @@ def _to_detail(job: YtUploadJob) -> UploadJobDetail:
         source_content_type=job.source_content_type,
         thumbnail_file_id=job.thumbnail_file_id,
         thumbnail_file_name=job.thumbnail_file_name,
-        targets=[UploadTargetResponse.model_validate(target) for target in job.targets],
+        targets=[_to_target(target, emails) for target in job.targets],
     )
 
 
@@ -110,7 +136,18 @@ class YtChannelManagementService:
             user_id,
             len(job.targets),
         )
-        return _to_detail(job)
+        return _to_detail(job, await self._load_emails([job]))
+
+    async def _load_emails(
+        self, jobs: list[YtUploadJob]
+    ) -> dict[uuid.UUID, Optional[str]]:
+        account_ids = {
+            target.account_id
+            for job in jobs
+            for target in job.targets
+            if target.account_id is not None
+        }
+        return await crud.get_account_emails(self._session, list(account_ids))
 
     async def list_uploads(
         self,
@@ -135,15 +172,17 @@ class YtChannelManagementService:
             limit=limit,
             offset=offset,
         )
+        emails = await self._load_emails(list(jobs))
         return UploadJobListResponse(
-            jobs=[_to_summary(job) for job in jobs],
+            jobs=[_to_list_item(job, emails) for job in jobs],
             total=total,
             limit=limit,
             offset=offset,
         )
 
     async def get_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
-        return _to_detail(await self._get_job(user_id, job_id))
+        job = await self._get_job(user_id, job_id)
+        return _to_detail(job, await self._load_emails([job]))
 
     async def retry_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
@@ -186,7 +225,8 @@ class YtChannelManagementService:
         await crud.refresh_job_status(self._session, job.id)
         await self._session.commit()
         logger.info("Retrying %s channels of upload job %s", len(retryable), job.id)
-        return _to_detail(await self._get_job(user_id, job_id))
+        fresh = await self._get_job(user_id, job_id)
+        return _to_detail(fresh, await self._load_emails([fresh]))
 
     async def cancel_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
@@ -198,7 +238,8 @@ class YtChannelManagementService:
         await crud.refresh_job_status(self._session, job.id)
         await self._session.commit()
         logger.info("Upload job %s cancelled (%s channels)", job.id, cancelled)
-        return _to_detail(await self._get_job(user_id, job_id))
+        fresh = await self._get_job(user_id, job_id)
+        return _to_detail(fresh, await self._load_emails([fresh]))
 
     async def get_quota(self) -> UploadQuotaResponse:
         now = utc_now()

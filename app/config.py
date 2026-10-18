@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     yt_watch_url_template: ClassVar[str] = "https://www.youtube.com/watch?v={video_id}"
     yt_list_default_limit: ClassVar[int] = 20
     yt_list_max_limit: ClassVar[int] = 100
+    yt_account_notes_max_length: ClassVar[int] = 500
+    google_userinfo_url: ClassVar[str] = "https://www.googleapis.com/oauth2/v3/userinfo"
+    google_userinfo_timeout_seconds: ClassVar[int] = 10
 
     # ── Google / YouTube ──────────────────────────────────────────────
     google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"

@@ -1,3 +1,4 @@
+# app/crud/yt_management.py
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -66,6 +67,7 @@ async def create_youtube_account(
     encrypted_refresh_token: str,
     token_expires_at: datetime,
     scopes: str,
+    google_email: Optional[str] = None,
 ) -> YouTubeAccount:
     account = YouTubeAccount(
         user_id=user_id,
@@ -73,6 +75,7 @@ async def create_youtube_account(
         channel_id=channel_id,
         channel_title=channel_title,
         channel_thumbnail_url=channel_thumbnail_url,
+        google_email=google_email,
         encrypted_access_token=encrypted_access_token,
         encrypted_refresh_token=encrypted_refresh_token,
         token_expires_at=token_expires_at,
@@ -146,10 +149,13 @@ async def reconnect_account(
     encrypted_refresh_token: str,
     token_expires_at: datetime,
     scopes: str,
+    google_email: Optional[str] = None,
 ) -> YouTubeAccount:
     account.nickname = nickname
     account.channel_title = channel_title
     account.channel_thumbnail_url = channel_thumbnail_url
+    if google_email:
+        account.google_email = google_email
     account.encrypted_access_token = encrypted_access_token
     account.encrypted_refresh_token = encrypted_refresh_token
     account.token_expires_at = token_expires_at
@@ -173,6 +179,40 @@ async def update_account_nickname(
     nickname: str,
 ) -> YouTubeAccount:
     account.nickname = nickname
+    await session.flush()
+    return account
+
+
+async def update_account_details(
+    session: AsyncSession,
+    account: YouTubeAccount,
+    *,
+    nickname: Optional[str],
+    notes: Optional[str],
+    update_notes: bool,
+) -> YouTubeAccount:
+    if nickname is not None:
+        account.nickname = nickname
+    if update_notes:
+        account.notes = notes
+    await session.flush()
+    return account
+
+
+async def update_account_profile(
+    session: AsyncSession,
+    account: YouTubeAccount,
+    *,
+    google_email: Optional[str],
+    channel_title: Optional[str],
+    channel_thumbnail_url: Optional[str],
+) -> YouTubeAccount:
+    if google_email:
+        account.google_email = google_email
+    if channel_title:
+        account.channel_title = channel_title
+    if channel_thumbnail_url:
+        account.channel_thumbnail_url = channel_thumbnail_url
     await session.flush()
     return account
 
