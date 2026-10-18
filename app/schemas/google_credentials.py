@@ -28,6 +28,7 @@ class GoogleCredentialsResponse(BaseModel):
     client_secret_saved: bool = False
     redirect_uri: str
     updated_at: Optional[datetime] = None
+    message: Optional[str] = None
 
 
 class MessageResponse(BaseModel):

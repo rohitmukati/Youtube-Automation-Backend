@@ -1,18 +1,23 @@
 # app/service/google_credentials.py
+import asyncio
+import hmac
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.exceptions import (
+    GoogleCredentialsInvalidError,
     GoogleCredentialsMissingError,
     NotFoundError,
     ServiceUnavailableError,
 )
 from app.crud import google_credentials as crud
+from app.integrations.google_oauth import ClientCheck, check_client_sync
 from app.schemas.google_credentials import GoogleCredentialsResponse
 from app.utils.token_encryption import decrypt_token, encrypt_token
 
@@ -21,6 +26,22 @@ logger = logging.getLogger(__name__)
 _UNREADABLE_MESSAGE = (
     "Your saved Google credentials could not be read. Save your Client ID and Client Secret again."
 )
+
+
+_INVALID_CLIENT_ERRORS = {
+    ClientCheck.CLIENT_NOT_FOUND: (
+        "client_id",
+        "Google could not find this Client ID. Copy the Client ID again from your Google Cloud console.",
+    ),
+    ClientCheck.SECRET_MISMATCH: (
+        "client_secret",
+        "This Client Secret does not match the Client ID. Copy the secret again from the same OAuth client.",
+    ),
+    ClientCheck.REJECTED: (
+        "client_id",
+        "Google does not accept this OAuth client. Create a client of type Web application and try again.",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -46,7 +67,7 @@ async def ensure_configured(session: AsyncSession, user_id: uuid.UUID) -> None:
         raise GoogleCredentialsMissingError()
 
 
-def _status(record) -> GoogleCredentialsResponse:
+def _status(record, message: Optional[str] = None) -> GoogleCredentialsResponse:
     if record is None:
         return GoogleCredentialsResponse(
             configured=False,
@@ -58,6 +79,7 @@ def _status(record) -> GoogleCredentialsResponse:
         client_secret_saved=True,
         redirect_uri=settings.google_redirect_uri,
         updated_at=record.updated_at,
+        message=message,
     )
 
 
@@ -75,6 +97,27 @@ class GoogleCredentialsService:
             raise ServiceUnavailableError(
                 "Secure storage is not configured on the server. Please contact support."
             )
+
+        existing = await crud.get_by_user(self._session, user_id)
+        if existing is not None and self._is_same(existing, client_id, client_secret):
+            return _status(
+                existing,
+                "These Google credentials are already saved and verified. Nothing was changed.",
+            )
+
+        check = await asyncio.to_thread(
+            check_client_sync, client_id, client_secret, settings.google_redirect_uri
+        )
+        if check is ClientCheck.UNREACHABLE:
+            raise ServiceUnavailableError(
+                "We could not reach Google to verify your credentials. Please try again in a moment."
+            )
+        if check in _INVALID_CLIENT_ERRORS:
+            field, message = _INVALID_CLIENT_ERRORS[check]
+            raise GoogleCredentialsInvalidError(
+                message, details=[{"field": field, "message": message}]
+            )
+
         encrypted_secret = encrypt_token(client_secret)
 
         for attempt in range(2):
@@ -103,8 +146,18 @@ class GoogleCredentialsService:
                 await self._session.rollback()
                 if attempt == 1:
                     raise
-        logger.info("Google credentials saved for user %s", user_id)
-        return _status(record)
+        logger.info("Google credentials saved for user %s (check=%s)", user_id, check.value)
+        return _status(record, "Your Google credentials were verified and saved.")
+
+    @staticmethod
+    def _is_same(record, client_id: str, client_secret: str) -> bool:
+        if record.client_id != client_id:
+            return False
+        try:
+            saved_secret = decrypt_token(record.encrypted_client_secret)
+        except RuntimeError:
+            return False
+        return hmac.compare_digest(saved_secret.encode(), client_secret.encode())
 
     async def delete(self, user_id: uuid.UUID) -> None:
         record = await crud.get_by_user(self._session, user_id)
