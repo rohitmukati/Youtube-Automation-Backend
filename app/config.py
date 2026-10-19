@@ -1,4 +1,5 @@
 # app/config.py
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, ClassVar, List, Optional
@@ -23,11 +24,6 @@ class Settings(BaseSettings):
     log_level: ClassVar[str] = "INFO"
     log_sql: ClassVar[bool] = False
     api_v1_prefix: ClassVar[str] = "/api/v1"
-    frontend_url: ClassVar[str] = "http://localhost:3000"
-    cors_origins: ClassVar[List[str]] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ]
 
     db_pool_size: ClassVar[int] = 5
     db_max_overflow: ClassVar[int] = 10
@@ -117,8 +113,19 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/youtube.readonly",
     ]
 
+    # ── Loaded from .env / environment variables ──────────────
     database_url: SecretStr
     jwt_secret_key: SecretStr
+
+    # FRONTEND_URL=https://your-frontend.com
+    frontend_url: str = "http://localhost:3000"
+
+    # CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+    # (comma-separated; JSON list '["a","b"]' bhi chalega)
+    cors_origins: Annotated[List[str], NoDecode] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
 
     smtp_username: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
@@ -127,6 +134,31 @@ class Settings(BaseSettings):
     supabase_service_role_key: Optional[SecretStr] = None
 
     token_encryption_key: Optional[SecretStr] = None
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("CORS_ORIGINS looks like JSON but is invalid") from exc
+                return [str(item).strip().rstrip("/") for item in parsed if str(item).strip()]
+            return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip().rstrip("/") for item in value if str(item).strip()]
+        return value
+
+    @field_validator("frontend_url")
+    @classmethod
+    def normalize_frontend_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
 
     @field_validator("database_url")
     @classmethod
