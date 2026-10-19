@@ -105,7 +105,6 @@ class Settings(BaseSettings):
     google_client_id_pattern: ClassVar[str] = r"^[A-Za-z0-9._-]{8,200}\.apps\.googleusercontent\.com$"
     google_client_secret_min_length: ClassVar[int] = 8
     google_client_secret_max_length: ClassVar[int] = 256
-    google_redirect_uri: ClassVar[str] = "http://localhost:8000/api/v1/youtube/callback"
     google_scopes: ClassVar[List[str]] = [
         "openid",
         "https://www.googleapis.com/auth/userinfo.email",
@@ -116,6 +115,9 @@ class Settings(BaseSettings):
     # ── Loaded from .env / environment variables ──────────────
     database_url: SecretStr
     jwt_secret_key: SecretStr
+
+    # GOOGLE_REDIRECT_URI=https://your-backend.com/api/v1/youtube/callback
+    google_redirect_uri: str = "http://localhost:8000/api/v1/youtube/callback"
 
     # FRONTEND_URL=https://your-frontend.com
     frontend_url: str = "http://localhost:3000"
