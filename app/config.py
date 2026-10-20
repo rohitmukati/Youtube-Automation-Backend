@@ -110,7 +110,54 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
     ]
+    google_required_scopes: ClassVar[List[str]] = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+    ]
+    yt_analytics_scope: ClassVar[str] = "https://www.googleapis.com/auth/yt-analytics.readonly"
+    yt_analytics_max_videos: ClassVar[int] = 2000
+    yt_analytics_page_size: ClassVar[int] = 50
+    yt_analytics_sync_ttl_seconds: ClassVar[int] = 6 * 3600
+    yt_analytics_sync_stale_seconds: ClassVar[int] = 900
+    yt_analytics_report_ttl_seconds: ClassVar[int] = 3 * 3600
+    yt_analytics_comments_ttl_seconds: ClassVar[int] = 6 * 3600
+    yt_analytics_data_delay_days: ClassVar[int] = 2
+    yt_analytics_default_days: ClassVar[int] = 28
+    yt_analytics_max_days: ClassVar[int] = 730
+    yt_analytics_top_videos_default: ClassVar[int] = 25
+    yt_analytics_top_videos_max: ClassVar[int] = 200
+    yt_analytics_search_terms_limit: ClassVar[int] = 25
+    yt_analytics_country_limit: ClassVar[int] = 25
+    yt_analytics_comments_limit: ClassVar[int] = 100
+    yt_analytics_min_video_age_days: ClassVar[int] = 7
+    yt_analytics_min_videos_for_insights: ClassVar[int] = 10
+    yt_analytics_min_slot_videos: ClassVar[int] = 2
+    yt_analytics_min_tag_videos: ClassVar[int] = 2
+    yt_analytics_min_group_videos: ClassVar[int] = 3
+    yt_analytics_neighbor_window_days: ClassVar[int] = 90
+    yt_analytics_neighbor_min: ClassVar[int] = 3
+    yt_analytics_default_timezone: ClassVar[str] = "Asia/Kolkata"
+    yt_analytics_short_max_seconds: ClassVar[int] = 180
+    yt_analytics_sync_error_max_length: ClassVar[int] = 300
+    yt_analytics_snapshot_retention_days: ClassVar[int] = 800
+    gemini_api_base_url: ClassVar[str] = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_timeout_seconds: ClassVar[int] = 120
+    gemini_temperature: ClassVar[float] = 0.4
+    gemini_max_output_tokens: ClassVar[int] = 16384
+    gemini_max_attempts: ClassVar[int] = 2
+    yt_ai_report_cache_hours: ClassVar[int] = 12
+    yt_ai_force_cooldown_seconds: ClassVar[int] = 120
+    yt_ai_daily_report_limit: ClassVar[int] = 30
+    yt_ai_default_days: ClassVar[int] = 28
+    yt_ai_comment_videos: ClassVar[int] = 5
+    yt_ai_comments_per_video: ClassVar[int] = 40
+    yt_ai_description_max_chars: ClassVar[int] = 1500
+    yt_ai_list_default_limit: ClassVar[int] = 20
 
     # ── Loaded from .env / environment variables ──────────────
     database_url: SecretStr
@@ -136,6 +183,13 @@ class Settings(BaseSettings):
     supabase_service_role_key: Optional[SecretStr] = None
 
     token_encryption_key: Optional[SecretStr] = None
+
+    # GEMINI_API_KEY=your-google-ai-studio-key
+    gemini_api_key: Optional[SecretStr] = None
+
+    # GEMINI_MODEL_FAST / GEMINI_MODEL_DEEP can be changed without touching the code
+    gemini_model_fast: str = "gemini-3.5-flash"
+    gemini_model_deep: str = "gemini-3.5-flash"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -199,6 +253,10 @@ class Settings(BaseSettings):
     @property
     def smtp_from_email(self) -> Optional[str]:
         return self.smtp_username
+
+    @property
+    def gemini_configured(self) -> bool:
+        return bool(self.gemini_api_key and self.gemini_api_key.get_secret_value().strip())
 
     @property
     def smtp_configured(self) -> bool:

@@ -81,7 +81,7 @@ async def oauth_callback(
             error=error,
         )
     except AppException as exc:
-        return _frontend_redirect(status="error", reason=exc.message)
+        return _frontend_redirect(status="error", reason=exc.message, code=exc.code)
     except Exception:
         logger.exception("Unexpected error in YouTube OAuth callback")
         return _frontend_redirect(

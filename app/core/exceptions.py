@@ -1,3 +1,4 @@
+# app/core/exceptions.py
 from typing import Any, Dict, List, Optional
 
 
@@ -128,3 +129,78 @@ class EmailNotConfiguredError(ServiceUnavailableError):
 class EmailDeliveryError(ServiceUnavailableError):
     code = "email_delivery_failed"
     message = "We could not send the email right now. Please try again in a few minutes."
+
+
+
+class AnalyticsScopeMissingError(BadRequestError):
+    code = "analytics_permission_missing"
+    message = (
+        "This channel was connected before analytics was available. "
+        "Reconnect the channel to unlock the analytics dashboard."
+    )
+
+
+class AnalyticsApiDisabledError(BadRequestError):
+    code = "youtube_api_not_enabled"
+    message = (
+        "A required YouTube API is not enabled in your Google Cloud project. "
+        "Enable the YouTube Data API v3 and the YouTube Analytics API, then try again."
+    )
+
+
+class AnalyticsNotSyncedError(BadRequestError):
+    code = "analytics_not_synced"
+    message = "The data of this channel has not been loaded yet. Start a sync first."
+
+
+class YouTubeQuotaError(AppException):
+    status_code = 429
+    code = "youtube_quota_exceeded"
+    message = (
+        "The daily YouTube API limit of your Google project has been reached. "
+        "It resets at midnight Pacific Time."
+    )
+
+
+class YouTubeApiError(ServiceUnavailableError):
+    code = "youtube_unavailable"
+    message = "YouTube did not answer properly. Please try again in a moment."
+
+
+class AiNotConfiguredError(ServiceUnavailableError):
+    code = "ai_not_configured"
+    message = "AI insights are not available right now. Please contact support."
+
+
+class AiGenerationError(ServiceUnavailableError):
+    code = "ai_generation_failed"
+    message = "The AI report could not be generated right now. Please try again in a few minutes."
+
+
+class AiLimitReachedError(TooManyAttemptsError):
+    code = "ai_limit_reached"
+    message = "You have reached the AI report limit. Please try again later."
+
+
+class CommentsPermissionMissingError(BadRequestError):
+    code = "comments_permission_missing"
+    message = (
+        "Reading comments needs one more permission. "
+        "Reconnect this channel and keep every permission ticked on the Google screen."
+    )
+
+
+class GoogleScopesMissingError(BadRequestError):
+    code = "google_scopes_missing"
+    message = (
+        "Some required Google permissions were not granted. "
+        "Connect the channel again and keep every permission ticked."
+    )
+
+
+class GoogleApiNotEnabledError(BadRequestError):
+    code = "google_api_not_enabled"
+    message = (
+        "A required Google API is not enabled in your Google Cloud project. "
+        "Enable it in the API Library and connect again."
+    )

@@ -1,3 +1,4 @@
+<!-- README.md -->
 # Youtube Automation Backend
 
 A FastAPI backend for managing many YouTube channels from one place. A user signs up, connects any number of YouTube channels (different Google accounts), keeps videos and images in a private library, and publishes one video to as many channels as they choose in a single action, with live status, automatic retries and a permanent upload history.
@@ -30,6 +31,8 @@ A FastAPI backend for managing many YouTube channels from one place. A user sign
 - **Reliable delivery:** every channel is processed independently with its own status and progress. A failure on one channel never stops the others. Temporary errors are retried automatically.
 - **Upload history:** a permanent record of what was published, with which title, description and tags, to which channels, and whether each one succeeded or failed.
 - **Quota awareness:** a daily upload counter keeps the app inside the YouTube API limit and refuses jobs that cannot fit.
+- **Channel analytics dashboard:** every channel's videos with views, likes and comments, channel and single-video analytics (watch time, retention, traffic sources, search terms, audience), and computed insights: best videos, best time to upload, best tags, title and duration patterns, upload cadence. An all-channels overview compares every connected channel.
+- **AI insights (Gemini):** strategy, content, publishing, audience and keyword reports, comment analysis, a 30-day content plan, single-video reviews and a multi-channel portfolio review. Numbers are computed by the backend; Gemini only interprets them.
 
 ## Project status
 
@@ -39,6 +42,8 @@ A FastAPI backend for managing many YouTube channels from one place. A user sign
 | YouTube accounts: connect, rename, list, disconnect, token refresh | Done |
 | Library: upload, list, tag, delete videos and images | Done |
 | Multi-channel upload jobs: retries, status tracking, history, quota | Implemented. Run an end-to-end check against your own Google project before production |
+| Channel analytics: sync, dashboards, insights | Implemented. Check the reports once against a real channel, because the YouTube Analytics API cannot be called from the test suite |
+| AI insights with Gemini | Implemented. Needs `GEMINI_API_KEY` |
 | Deployment on GCP | Not started |
 
 ## How it works
@@ -85,7 +90,7 @@ app/
   crud/                  database queries
   service/               business logic
   routes/                API endpoints
-  integrations/          external systems (SMTP, YouTube API)
+  integrations/          external systems (SMTP, YouTube Data and Analytics APIs, Gemini)
   workers/               background jobs (YouTube upload worker)
   utils/                 helpers: validators, retry and error rules, bucket client, tokens
 tests/                   automated tests
@@ -99,6 +104,8 @@ Each feature has one file per layer:
 | YouTube account connection | `yt_management.py` |
 | Library | `storage_bucket.py` |
 | Multi-channel upload | `yt_channel_management.py` |
+| Channel analytics | `yt_analytics.py` |
+| AI insights | `yt_ai_insights.py` |
 
 ## Getting started
 
@@ -136,6 +143,9 @@ Only these live in `.env`. Everything else is fixed in `app/config.py`.
 | `GOOGLE_CLIENT_ID` | YouTube | OAuth client ID from Google Cloud. |
 | `GOOGLE_CLIENT_SECRET` | YouTube | OAuth client secret from Google Cloud. |
 | `TOKEN_ENCRYPTION_KEY` | YouTube | Fernet key used to encrypt Google tokens before saving them. |
+| `GEMINI_API_KEY` | AI insights | API key from Google AI Studio. Without it every AI endpoint answers `ai_not_configured` and the rest of the app works normally. |
+| `GEMINI_MODEL_FAST` | No | Model for quick reports. Default `gemini-2.5-flash`. |
+| `GEMINI_MODEL_DEEP` | No | Model for strategy, content, plan and portfolio reports. Default `gemini-2.5-pro`. |
 
 Generate a JWT secret: `python -c "import secrets; print(secrets.token_urlsafe(64))"`
 
@@ -161,18 +171,25 @@ ALTER TABLE public.storage_file_tags ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.yt_upload_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.yt_upload_targets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.yt_upload_quota_days ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.yt_analytics_syncs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.yt_channel_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.yt_videos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.yt_analytics_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.yt_ai_reports ENABLE ROW LEVEL SECURITY;
 ```
 
 Repeat this for every new table. The private storage bucket (`artifacts`) is created automatically on the first upload.
 
 ### Google Cloud
 
-1. Create a project in Google Cloud Console and enable **YouTube Data API v3**.
+1. Create a project in Google Cloud Console and enable **YouTube Data API v3** and **YouTube Analytics API**.
 2. Configure the OAuth consent screen. While it is in Testing mode, add every Gmail you will connect as a test user and note that refresh tokens expire after 7 days. Publish and verify the app for real users.
 3. Create an OAuth client of type **Web application** with the redirect URI `http://localhost:8000/api/v1/youtube/callback` (use your deployed callback URL in production).
 4. Put the client ID and secret in `.env`.
 
-The app requests these scopes: `openid`, `userinfo.email`, `youtube.upload` and `youtube.readonly`. They cover uploading videos, setting thumbnails and reading channel details. Adding a scope later means every channel has to be connected again.
+The app requests these scopes: `openid`, `userinfo.email`, `youtube.upload`, `youtube.readonly` and `yt-analytics.readonly`. They cover uploading videos, setting thumbnails, reading channel and video details, and reading analytics. Adding a scope later means every channel has to be connected again. A channel connected before `yt-analytics.readonly` was added still shows the data loaded through the Data API, and the analytics endpoints answer `analytics_permission_missing` until it is reconnected.
+
+Every user who brings their own Google project must enable the **YouTube Analytics API** in that project too. Without it the analytics endpoints answer `youtube_api_not_enabled`.
 
 ## API reference
 
@@ -291,6 +308,51 @@ Example job response (shortened):
 }
 ```
 
+### Channel analytics
+
+All paths start with `/yt-analytics`. Dates are `YYYY-MM-DD`. Every range endpoint takes `days` (1 to 730, default 28) or `start_date` with `end_date`. YouTube analytics lags about 2 days, so the range ends 2 days ago.
+
+| Method and path | Description |
+|---|---|
+| `GET /overview` | All connected channels side by side: subscribers, views, upload activity, growth, sync state. Uses stored data only. |
+| `POST /accounts/{id}/sync` | Load the channel and all of its videos in the background. Returns 202 with the sync state. If a sync is already running, its state is returned. |
+| `GET /accounts/{id}/sync` | Sync state: `idle`, `running`, `completed` or `failed`, with `is_stale` when the data is older than 6 hours. |
+| `GET /accounts/{id}/channel` | Dashboard header: profile, subscribers, growth, video counts, totals, `analytics_enabled`, `needs_reconnect`, `has_data`. |
+| `GET /accounts/{id}/performance` | Views, watch time, average view duration and percentage, likes, comments, shares and subscribers for the period, the period before it, the change in percent and a daily series. |
+| `GET /accounts/{id}/audience` | Age and gender, countries, devices, subscribed versus not subscribed. |
+| `GET /accounts/{id}/traffic` | Traffic sources, YouTube search terms, Shorts versus long-form versus live. |
+| `GET /accounts/{id}/top-videos` | Best videos of the period. `limit` up to 200. |
+| `GET /accounts/{id}/videos` | Every video. Filters: `search`, `content_type` (`all`, `short`, `long`), `privacy_status`, `date_from`, `date_to`. Sort: `published_at`, `views`, `likes`, `comments`, `engagement`, `performance`, `duration`. Paging: `limit`, `offset`. |
+| `GET /accounts/{id}/videos/{video_id}` | One video with its rank and comparison against the channel median. |
+| `GET /accounts/{id}/videos/{video_id}/analytics` | Daily series, audience retention curve, traffic sources, search terms and demographics. Without a range the whole life of the video is used. |
+| `GET /accounts/{id}/videos/{video_id}/comments` | Top comments (up to 100). `comments_disabled` is true when the video has comments turned off. |
+| `GET /accounts/{id}/insights/publishing` | Best weekday, hour and day part to upload, heatmap and upload cadence. Optional `timezone` (default `Asia/Kolkata`) and `content_type`. |
+| `GET /accounts/{id}/insights/content` | Best and weakest videos, tag performance, title patterns, duration groups. |
+
+How the insights are computed:
+
+- Videos are stored on sync. A video gets a `performance_index`: its views divided by the median views of videos of the same format (Shorts or long-form) published within 90 days of it. 1.0 is typical, 2.0 is twice as good. Videos younger than 7 days have none.
+- Best upload time compares the performance index of every video grouped by weekday and hour in the chosen timezone. Results carry `sample_size` and `confidence`. YouTube does not share when viewers are online through its API.
+- A video counts as a Short when it is 180 seconds or shorter.
+- Sections that YouTube refuses for a channel come back with `available: false` and a `message` instead of failing the whole response.
+- Analytics results are cached for 3 hours and comments for 6 hours.
+
+### AI insights
+
+| Method and path | Description |
+|---|---|
+| `POST /yt-analytics/accounts/{id}/ai-reports` | Body: `report_type`, optional `days` (7 to 365), `language` (`en` or `hinglish`), `video_id` (required for `video_review`), `timezone`, `force`. Returns the saved report. |
+| `POST /yt-analytics/ai-reports/portfolio` | Body: optional `days`, `language`, `force`. Compares all connected channels. |
+| `GET /yt-analytics/ai-reports` | Saved reports, newest first. Filters: `account_id`, `video_id`, `report_type`. |
+| `GET /yt-analytics/ai-reports/{report_id}` | One saved report. |
+| `DELETE /yt-analytics/ai-reports/{report_id}` | Delete a saved report. |
+
+Report types: `channel_strategy`, `content_analysis`, `publishing_schedule`, `audience_keywords`, `comments_insights`, `content_plan`, `video_review`, `portfolio`.
+
+A report has a `headline`, `summary`, optional `score`, `strengths`, `weaknesses`, `insights` (each with finding, evidence, recommendation, action steps, priority, impact, effort and confidence), `quick_wins`, `content_ideas`, `experiments` and `data_limitations`. `data_quality` lists what was missing when it was created.
+
+Rules: the same data returns the saved report with `cached: true` for 12 hours; `force` creates a new one but at most once every 2 minutes per report; each user can create 30 reports in 24 hours; creating a report can take up to a minute. The prompt version is part of the cache key, so improving the prompt never returns an older report.
+
 ### Health
 
 | Method and path | Description |
@@ -395,7 +457,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests use an in-memory SQLite database and a recording email service, so they never send real email or touch Supabase or YouTube. `tests/test_yt_channel_management_utils.py` covers validation, job status, retry delays, quota day, and YouTube error classification.
+The tests use an in-memory SQLite database and a recording email service, so they never send real email or touch Supabase or YouTube. `tests/test_yt_channel_management_utils.py` covers validation, job status, retry delays, quota day, and YouTube error classification. `tests/test_yt_analytics_utils.py` covers date ranges, performance index, best upload time, tag and title insights, cadence, prompt building and parsing of AI answers.
 
 ## Configuration reference
 
@@ -415,12 +477,21 @@ Fixed values live in `app/config.py`. The ones most often changed:
 | `yt_upload_stale_after_seconds` | 600 | When an interrupted upload returns to the queue |
 | `yt_default_privacy` | `private` | Privacy used when the request does not set one |
 | `storage_video_max_bytes` | 50 MB | Largest video accepted by the library |
-| `google_scopes` | upload, readonly | OAuth scopes requested from Google |
+| `google_scopes` | upload, readonly, analytics | OAuth scopes requested from Google |
+| `yt_analytics_max_videos` | 2000 | Videos loaded per channel on a sync |
+| `yt_analytics_sync_ttl_seconds` | 6 hours | Age after which synced data counts as stale |
+| `yt_analytics_sync_stale_seconds` | 900 | When a sync that never finished can be started again |
+| `yt_analytics_report_ttl_seconds` | 3 hours | How long YouTube Analytics results are cached |
+| `yt_analytics_default_timezone` | `Asia/Kolkata` | Timezone for best upload time |
+| `yt_ai_report_cache_hours` | 12 | How long the same data returns the saved AI report |
+| `yt_ai_daily_report_limit` | 30 | AI reports per user in 24 hours |
+| `yt_ai_force_cooldown_seconds` | 120 | Wait before a report can be regenerated |
 
 ## Deployment
 
 - Target: Cloud Run. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT` (no `--reload`).
 - Set `APP_ENV=production`, `CORS_ORIGINS` and `GOOGLE_REDIRECT_URI` as environment variables. Keep `DATABASE_URL`, `JWT_SECRET_KEY`, `SMTP_PASSWORD`, `TOKEN_ENCRYPTION_KEY` and the Google and Supabase secrets in Secret Manager.
+- A channel sync and the AI report run inside the API process after the response is sent, so they also need CPU while no request is running. Use always-allocated CPU or a minimum of one instance, as for the upload worker. A sync that is interrupted is marked failed after 15 minutes and can be started again.
 - The upload worker needs CPU while no request is running. Run it as its own service with CPU always allocated (`python -m app.workers.yt_channel_management`) and set `yt_upload_worker_enabled` to `False` for the API service, or use a Cloud Run service with minimum one instance and always-on CPU.
 - A Dockerfile is still to be written.
 - Tables are created with `create_all`, which only creates missing tables. It does not change existing ones. When a column must be added later, run the SQL manually in the Supabase SQL editor, or introduce Alembic before the schema changes often.
@@ -432,6 +503,8 @@ Fixed values live in `app/config.py`. The ones most often changed:
 - Scheduled publishing across channels with different times.
 - Rate limiting on login, signup and forgot-password.
 - Dockerfile, CI pipeline and Cloud Run deployment.
+- Nightly automatic sync and a weekly AI report by email.
+- Competitor benchmarking from public channel data.
 - Structured logging and error monitoring.
 - Alembic migrations once tables change often.
 - Rotate every credential that was shared during development: database password, JWT secret, Gmail app password.

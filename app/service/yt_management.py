@@ -1,6 +1,7 @@
 # app/service/yt_management.py
 import asyncio
 import logging
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +22,9 @@ from app.core.exceptions import (
     AccountDisabledError,
     AppException,
     ConflictError,
+    GoogleApiNotEnabledError,
     GoogleCredentialsInvalidError,
+    GoogleScopesMissingError,
     NotFoundError,
     ServiceUnavailableError,
     ValidationError,
@@ -35,6 +39,17 @@ from app.schemas.yt_management import (
 )
 from app.service.google_credentials import GoogleClient, load_client
 from app.utils.datetime_utils import ensure_utc, utc_now
+from app.utils.google_credentials import (
+    API_ANALYTICS_NAME,
+    API_DATA_NAME,
+    api_activation_url,
+    apis_not_enabled_message,
+    is_api_disabled_error,
+    is_permission_error,
+    missing_required_scopes,
+    parse_granted_scopes,
+    scopes_missing_message,
+)
 from app.utils.token_encryption import decrypt_token, encrypt_token
 
 logger = logging.getLogger(__name__)
@@ -91,10 +106,15 @@ def _expiry_of(credentials: Credentials) -> datetime:
     return utc_now() + timedelta(hours=1)
 
 
-def _exchange_code_sync(code: str, client: GoogleClient) -> Credentials:
+def _exchange_code_sync(code: str, client: GoogleClient) -> tuple[Credentials, list[str]]:
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
     flow = _build_flow(client)
-    flow.fetch_token(code=code)
-    return flow.credentials
+    token = flow.fetch_token(code=code)
+    credentials = flow.credentials
+    granted = parse_granted_scopes((token or {}).get("scope")) or parse_granted_scopes(
+        credentials.scopes
+    )
+    return credentials, granted
 
 
 def _fetch_channel_info_sync(credentials: Credentials) -> dict:
@@ -115,6 +135,46 @@ def _fetch_channel_info_sync(credentials: Credentials) -> dict:
         "channel_id": channel["id"],
         "channel_title": snippet.get("title", "Unknown Channel"),
         "thumbnail_url": thumbnail_url,
+    }
+
+
+def _probe_analytics_sync(credentials: Credentials) -> None:
+    analytics = build("youtubeAnalytics", "v2", credentials=credentials, cache_discovery=False)
+    day = (utc_now() - timedelta(days=3)).date().isoformat()
+    analytics.reports().query(
+        ids="channel==MINE", startDate=day, endDate=day, metrics="views"
+    ).execute()
+
+
+def _check_google_access_sync(credentials: Credentials) -> dict:
+    disabled: list[tuple[str, str]] = []
+    permission_denied = False
+    channel_info: Optional[dict] = None
+
+    try:
+        channel_info = _fetch_channel_info_sync(credentials)
+    except HttpError as exc:
+        if is_api_disabled_error(exc):
+            disabled.append((API_DATA_NAME, api_activation_url(exc, API_DATA_NAME)))
+        elif is_permission_error(exc):
+            permission_denied = True
+        else:
+            raise
+
+    try:
+        _probe_analytics_sync(credentials)
+    except HttpError as exc:
+        if is_api_disabled_error(exc):
+            disabled.append((API_ANALYTICS_NAME, api_activation_url(exc, API_ANALYTICS_NAME)))
+        elif is_permission_error(exc):
+            permission_denied = True
+        else:
+            logger.warning("YouTube Analytics probe was not conclusive: %s", exc)
+
+    return {
+        "channel_info": channel_info,
+        "disabled": disabled,
+        "permission_denied": permission_denied,
     }
 
 
@@ -218,23 +278,60 @@ class YouTubeManagementService:
 
         client = await load_client(self._session, user_id)
 
+        generic_failure = ValidationError(
+            "The Google account could not be connected. Check your saved Client ID, "
+            "Client Secret and redirect URI, then try again."
+        )
+
         try:
-            credentials = await asyncio.to_thread(_exchange_code_sync, code, client)
-            channel_info = await asyncio.to_thread(_fetch_channel_info_sync, credentials)
+            credentials, granted_scopes = await asyncio.to_thread(_exchange_code_sync, code, client)
         except AppException:
             raise
         except Exception:
-            logger.exception("Google OAuth callback failed for user %s", user_id)
-            raise ValidationError(
-                "The Google account could not be connected. Check your saved Client ID, "
-                "Client Secret and redirect URI, then try again."
+            logger.exception("Google OAuth code exchange failed for user %s", user_id)
+            raise generic_failure
+
+        missing_scopes = missing_required_scopes(granted_scopes)
+        if missing_scopes:
+            logger.info("User %s did not grant scopes: %s", user_id, missing_scopes)
+            raise GoogleScopesMissingError(
+                scopes_missing_message(missing_scopes),
+                details=[{"field": scope, "message": "Permission not granted."} for scope in missing_scopes],
             )
+
+        try:
+            access = await asyncio.to_thread(_check_google_access_sync, credentials)
+        except AppException:
+            raise
+        except Exception:
+            logger.exception("Google access check failed for user %s", user_id)
+            raise generic_failure
+
+        if access["disabled"]:
+            raise GoogleApiNotEnabledError(
+                apis_not_enabled_message([name for name, _ in access["disabled"]]),
+                details=[
+                    {"field": name, "message": "Enable this API.", "action_url": url}
+                    for name, url in access["disabled"]
+                ],
+            )
+        if access["permission_denied"]:
+            raise GoogleScopesMissingError(
+                scopes_missing_message(
+                    [
+                        scope
+                        for scope in settings.google_required_scopes
+                        if scope.endswith("youtube.readonly") or scope.endswith("yt-analytics.readonly")
+                    ]
+                )
+            )
+        channel_info = access["channel_info"]
 
         google_email = await asyncio.to_thread(_fetch_email_sync, credentials)
 
         channel_id = channel_info["channel_id"]
         token_expires_at = _expiry_of(credentials)
-        scopes = " ".join(credentials.scopes or settings.google_scopes)
+        scopes = " ".join(granted_scopes or settings.google_scopes)
 
         existing = await yt_crud.get_account_by_channel_id(
             self._session, user_id, channel_id
