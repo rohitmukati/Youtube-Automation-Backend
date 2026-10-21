@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Youtube Automation Backend
 
-A FastAPI backend for managing many YouTube channels from one place. A user signs up, connects any number of YouTube channels (different Google accounts), keeps videos and images in a private library, and publishes one video to as many channels as they choose in a single action, with live status, automatic retries and a permanent upload history.
+A FastAPI backend for managing many YouTube channels from one place. A user signs up, connects any number of YouTube channels (different Google accounts), keeps videos and images in a private library, and publishes one video to as many channels as they choose in a single action, with live status, automatic retries and a permanent upload history.  
 
 ## Table of contents
 
