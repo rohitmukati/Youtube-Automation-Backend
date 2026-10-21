@@ -45,12 +45,19 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: ClassVar[int] = 15
     smtp_from_name: ClassVar[str] = "Youtube Automation"
 
-    supabase_storage_bucket: ClassVar[str] = "artifacts"
-
     storage_signed_url_ttl_seconds: ClassVar[int] = 3600
+    storage_signed_url_max_ttl_seconds: ClassVar[int] = 7 * 24 * 3600
     storage_request_timeout_seconds: ClassVar[int] = 30
     storage_upload_timeout_seconds: ClassVar[int] = 600
-    storage_video_max_bytes: ClassVar[int] = 50 * 1024 * 1024
+    storage_connect_timeout_seconds: ClassVar[int] = 10
+    storage_max_attempts: ClassVar[int] = 3
+    storage_max_pool_connections: ClassVar[int] = 32
+    storage_multipart_chunk_bytes: ClassVar[int] = 8 * 1024 * 1024
+    storage_multipart_concurrency: ClassVar[int] = 4
+    storage_multipart_buffered_chunks: ClassVar[int] = 6
+    storage_b2_endpoint_pattern: ClassVar[str] = r"^s3\.([a-z0-9-]+)\.backblazeb2\.com$"
+    storage_fallback_region: ClassVar[str] = "us-east-1"
+    storage_video_max_bytes: ClassVar[int] = 500 * 1024 * 1024
     storage_image_max_bytes: ClassVar[int] = 10 * 1024 * 1024
     storage_video_content_types: ClassVar[List[str]] = [
         "video/mp4",
@@ -179,8 +186,10 @@ class Settings(BaseSettings):
     smtp_username: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
 
-    supabase_url: Optional[str] = None
-    supabase_service_role_key: Optional[SecretStr] = None
+    b2_endpoint_url: Optional[str] = None
+    b2_bucket_name: Optional[str] = None
+    b2_key_id: Optional[str] = None
+    b2_application_key: Optional[SecretStr] = None
 
     token_encryption_key: Optional[SecretStr] = None
 

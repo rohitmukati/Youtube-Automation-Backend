@@ -26,7 +26,7 @@ A FastAPI backend for managing many YouTube channels from one place. A user sign
 
 - **Accounts:** sign up, log in, refresh tokens, logout, forgot and reset password. Authentication is built in-house; Supabase Auth is not used.
 - **Multiple YouTube channels:** connect, rename, list and disconnect channels. Tokens are encrypted at rest and refreshed automatically. A channel whose permission was revoked is flagged "needs reconnect".
-- **Library (Storage):** upload videos and images once, tag them, search and filter them, and reuse them. Files live in a private Supabase Storage bucket.
+- **Library (Storage):** upload videos and images once, tag them, search and filter them, and reuse them. Files live in a private Backblaze B2 bucket.
 - **Multi-channel publishing:** pick a video from the library, pick any number of connected channels (up to 50 per upload by default), and publish with the same title, description, tags and settings everywhere.
 - **Reliable delivery:** every channel is processed independently with its own status and progress. A failure on one channel never stops the others. Temporary errors are retried automatically.
 - **Upload history:** a permanent record of what was published, with which title, description and tags, to which channels, and whether each one succeeded or failed.
@@ -41,6 +41,7 @@ A FastAPI backend for managing many YouTube channels from one place. A user sign
 | Auth: signup, login, refresh, logout, forgot and reset password | Done and tested |
 | YouTube accounts: connect, rename, list, disconnect, token refresh | Done |
 | Library: upload, list, tag, delete videos and images | Done |
+| File storage on Backblaze B2 (S3-compatible API) | Done and tested against a local S3 server. Run the check in [Backblaze B2](#backblaze-b2) once against your own bucket |
 | Multi-channel upload jobs: retries, status tracking, history, quota | Implemented. Run an end-to-end check against your own Google project before production |
 | Channel analytics: sync, dashboards, insights | Implemented. Check the reports once against a real channel, because the YouTube Analytics API cannot be called from the test suite |
 | AI insights with Gemini | Implemented. Needs `GEMINI_API_KEY` |
@@ -51,7 +52,7 @@ A FastAPI backend for managing many YouTube channels from one place. A user sign
 ```mermaid
 flowchart LR
     A[Browser] -->|1. upload file| B[Library API]
-    B --> C[(Supabase Storage)]
+    B --> C[(Backblaze B2 bucket)]
     A -->|2. pick video + channels| D[Upload API]
     D --> E[(Postgres: jobs and targets)]
     F[Upload worker] -->|3. claim pending target| E
@@ -63,14 +64,14 @@ flowchart LR
 
 1. A video that is on the user's computer is first uploaded to the library (`POST /storage/files`). A video already in the library is used directly.
 2. The user creates an upload job: one library video, one set of metadata, and a list of channels. The API validates everything, saves the job and returns immediately.
-3. A background worker claims waiting channel targets one by one (several in parallel), streams the video from Storage to YouTube in 8 MB chunks, and writes progress and the final result back to the database.
+3. A background worker claims waiting channel targets one by one (several in parallel), streams the video from storage to YouTube in 8 MB chunks, and writes progress and the final result back to the database.
 4. The client polls the job to show live status, and reads the history later.
 
 ## Tech stack
 
 - Python 3.12, FastAPI, Uvicorn
-- SQLAlchemy 2 (async) with asyncpg, Supabase Postgres
-- Supabase Storage (private bucket) accessed through its REST API
+- SQLAlchemy 2 (async) with asyncpg, Supabase Postgres (database only)
+- Backblaze B2 (private bucket) accessed through its S3-compatible API with boto3
 - Google OAuth 2.0 and YouTube Data API v3 (`google-api-python-client`)
 - Argon2 password hashing, JWT access tokens, rotating refresh tokens
 - Fernet encryption for Google tokens
@@ -112,14 +113,15 @@ Each feature has one file per layer:
 ### Prerequisites
 
 - Python 3.12
-- A Supabase project (database and storage)
+- A Supabase project (database)
+- A Backblaze B2 account with one private bucket (file storage)
 - A Google Cloud project with YouTube Data API v3 enabled
 - On Windows, the `tzdata` package (the daily quota follows Pacific Time)
 
 ### Run locally
 
 1. Create and activate a virtual environment.
-2. Install dependencies: `pip install -r requirements.txt` (use `requirements-dev.txt` to also run tests). Make sure `tzdata` is included.
+2. Install dependencies: `pip install -r requirements.txt` (use `requirements-dev.txt` to also run tests). Make sure `tzdata` is included, and `boto3` version 1.36 or newer.
 3. Create `.env` from `.env.example` and fill in the values below.
 4. Start the server: `uvicorn main:app --reload`
 5. Open `http://localhost:8000/docs`.
@@ -138,8 +140,10 @@ Only these live in `.env`. Everything else is fixed in `app/config.py`.
 | `JWT_SECRET_KEY` | Yes | Random secret, at least 32 characters. Also used to hash reset codes. |
 | `SMTP_USERNAME` | For reset emails | Gmail address that sends the codes. Also used as the From address. |
 | `SMTP_PASSWORD` | For reset emails | Gmail app password. |
-| `SUPABASE_URL` | Library and uploads | Project URL from the Supabase dashboard. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Library and uploads | Secret key (`sb_secret_...`) from Settings, API Keys. Backend only. |
+| `B2_ENDPOINT_URL` | Library and uploads | S3 endpoint of the bucket, for example `https://s3.us-east-005.backblazeb2.com`. The region is read from it. |
+| `B2_BUCKET_NAME` | Library and uploads | Name of the private B2 bucket. |
+| `B2_KEY_ID` | Library and uploads | Key ID of a B2 application key restricted to that bucket. |
+| `B2_APPLICATION_KEY` | Library and uploads | Secret of that application key. Backend only. |
 | `GOOGLE_CLIENT_ID` | YouTube | OAuth client ID from Google Cloud. |
 | `GOOGLE_CLIENT_SECRET` | YouTube | OAuth client secret from Google Cloud. |
 | `TOKEN_ENCRYPTION_KEY` | YouTube | Fernet key used to encrypt Google tokens before saving them. |
@@ -150,6 +154,8 @@ Only these live in `.env`. Everything else is fixed in `app/config.py`.
 Generate a JWT secret: `python -c "import secrets; print(secrets.token_urlsafe(64))"`
 
 Generate a token encryption key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+
+The old `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` variables are no longer used and can be removed from `.env`.
 
 ## External setup
 
@@ -178,7 +184,17 @@ ALTER TABLE public.yt_analytics_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.yt_ai_reports ENABLE ROW LEVEL SECURITY;
 ```
 
-Repeat this for every new table. The private storage bucket (`artifacts`) is created automatically on the first upload.
+Repeat this for every new table.
+
+### Backblaze B2
+
+1. Create a bucket in the B2 dashboard. Keep it **Private**. Note its name and its endpoint (shown on the bucket card, for example `s3.us-east-005.backblazeb2.com`). The app does not create the bucket.
+2. Open Application Keys and create a new key with **Read and Write** access, restricted to that one bucket. The Master Application Key does not work with the S3-compatible API. The key is shown only once; put the key ID and the key in `.env`.
+3. Open the bucket's Lifecycle Settings and choose **Keep only the last version of the file**. The app already deletes every stored version of a file when it is removed from the library, so this is a safety net for anything that is deleted by other tools.
+4. Put `B2_ENDPOINT_URL` (with `https://` in front), `B2_BUCKET_NAME`, `B2_KEY_ID` and `B2_APPLICATION_KEY` in `.env`.
+5. Check it once: upload a small video in `/docs` with `POST /storage/files`, open the `signed_url` from `GET /storage/files` in a browser, delete the file with `DELETE /storage/files/{id}`, and confirm in the B2 dashboard that the bucket shows no files and no hidden versions.
+
+CORS rules are not needed while files are uploaded through the API. They are needed only if the browser uploads straight to B2 (see the roadmap).
 
 ### Google Cloud
 
@@ -230,7 +246,7 @@ A channel can be connected once per user. Connecting it again refreshes its toke
 | `PATCH /storage/files/{id}` | Replace the tags of a file. |
 | `DELETE /storage/files/{id}` | Delete a file. |
 
-Videos: MP4, MOV, AVI, MKV, WEBM, MPEG. Images: JPG, PNG, WEBP, GIF.
+Videos: MP4, MOV, AVI, MKV, WEBM, MPEG, up to 500 MB each. Images: JPG, PNG, WEBP, GIF, up to 10 MB each. Signed URLs are valid for 1 hour.
 
 ### Multi-channel upload
 
@@ -420,7 +436,7 @@ History is permanent. Each job keeps its own copy of the video file name, title,
 
 ### Worker behavior
 
-- The video is streamed from Supabase Storage to YouTube in 8 MB chunks with HTTP range requests. Nothing is written to disk.
+- The video is streamed from Backblaze B2 to YouTube in 8 MB chunks with HTTP range requests on a signed URL. Nothing is written to disk.
 - Up to 3 channels upload in parallel (`yt_upload_concurrency`).
 - Waiting work is claimed with `FOR UPDATE SKIP LOCKED`, so more than one worker can run safely.
 - Uploads that were running when the server stopped return to the queue after 10 minutes.
@@ -431,7 +447,8 @@ History is permanent. Each job keeps its own copy of the video file name, title,
 
 - **Daily upload limit:** the default is 100 uploads per day for the whole project (see Quota). One video sent to 20 channels uses 20.
 - **Channel limits:** YouTube also applies its own daily upload limit per channel, especially to new or unverified channels. Such a failure is reported as `channel_upload_limit`.
-- **Library file size:** the app allows videos up to 50 MB (`storage_video_max_bytes`) and images up to 10 MB. Your Supabase plan has its own per-file limit. Real videos are usually larger, so raise both limits together or move video storage to Google Cloud Storage.
+- **Library file size:** videos up to 500 MB (`storage_video_max_bytes`) and images up to 10 MB (`storage_image_max_bytes`). Backblaze B2 itself accepts much larger files, but a file passes through the API server on its way to B2, so keep the limit in line with the memory, disk and request-size limits of your server. A 500 MB upload uses roughly 70 MB of memory while it runs.
+- **Backblaze B2 costs:** the first 10 GB of storage is free. Downloads are free up to 3 times the average amount stored in the month, then billed per GB. Each channel in an upload reads the whole video once, so a video sent to 20 channels counts as 20 downloads of that video. Check the current prices on the Backblaze pricing page.
 - **Custom thumbnails:** YouTube may require the channel to be verified. The video is still published if the thumbnail is refused.
 - **Consent screen:** in Testing mode refresh tokens expire after 7 days and only listed test users can connect. Publish and verify the app before real users connect.
 - **Compliance audit:** Google may require an API compliance audit before large scale use or a higher quota.
@@ -448,7 +465,8 @@ History is permanent. Each job keeps its own copy of the video file name, title,
 - Google access and refresh tokens are encrypted with Fernet before they are stored and are never returned by the API.
 - OAuth uses a single-use `state` value stored in the database and valid for 10 minutes to prevent forged callbacks.
 - Every upload, library and channel query is scoped to the logged in user.
-- Secrets are read as `SecretStr` and never logged.
+- Library files live in a private bucket and are reachable only through signed URLs that expire (1 hour by default). The B2 key is restricted to that one bucket.
+- Secrets are read as `SecretStr` and never logged. Signed URLs are never logged.
 
 ## Testing
 
@@ -457,7 +475,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests use an in-memory SQLite database and a recording email service, so they never send real email or touch Supabase or YouTube. `tests/test_yt_channel_management_utils.py` covers validation, job status, retry delays, quota day, and YouTube error classification. `tests/test_yt_analytics_utils.py` covers date ranges, performance index, best upload time, tag and title insights, cadence, prompt building and parsing of AI answers.
+The tests use an in-memory SQLite database and a recording email service, so they never send real email or touch Supabase, Backblaze B2 or YouTube. `tests/test_yt_channel_management_utils.py` covers validation, job status, retry delays, quota day, and YouTube error classification. `tests/test_yt_analytics_utils.py` covers date ranges, performance index, best upload time, tag and title insights, cadence, prompt building and parsing of AI answers. `tests/test_storage_bucket_utils.py` covers the storage client with a fake S3 client: configuration checks, signed URLs, upload checks, deleting every stored version, and the mapping of storage errors to friendly messages.
 
 ## Configuration reference
 
@@ -476,7 +494,12 @@ Fixed values live in `app/config.py`. The ones most often changed:
 | `yt_upload_worker_poll_seconds` | 3 | How often an idle worker looks for work |
 | `yt_upload_stale_after_seconds` | 600 | When an interrupted upload returns to the queue |
 | `yt_default_privacy` | `private` | Privacy used when the request does not set one |
-| `storage_video_max_bytes` | 50 MB | Largest video accepted by the library |
+| `storage_video_max_bytes` | 500 MB | Largest video accepted by the library |
+| `storage_image_max_bytes` | 10 MB | Largest image accepted by the library |
+| `storage_signed_url_ttl_seconds` | 3600 | How long a library signed URL is valid |
+| `storage_upload_timeout_seconds` | 600 | Read timeout of the storage client while uploading |
+| `storage_multipart_chunk_bytes` | 8 MB | Part size of a large upload to B2 (B2 needs at least 5 MB) |
+| `storage_multipart_concurrency` | 4 | Parts of one upload sent in parallel |
 | `google_scopes` | upload, readonly, analytics | OAuth scopes requested from Google |
 | `yt_analytics_max_videos` | 2000 | Videos loaded per channel on a sync |
 | `yt_analytics_sync_ttl_seconds` | 6 hours | Age after which synced data counts as stale |
@@ -490,7 +513,8 @@ Fixed values live in `app/config.py`. The ones most often changed:
 ## Deployment
 
 - Target: Cloud Run. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT` (no `--reload`).
-- Set `APP_ENV=production`, `CORS_ORIGINS` and `GOOGLE_REDIRECT_URI` as environment variables. Keep `DATABASE_URL`, `JWT_SECRET_KEY`, `SMTP_PASSWORD`, `TOKEN_ENCRYPTION_KEY` and the Google and Supabase secrets in Secret Manager.
+- Set `APP_ENV=production`, `CORS_ORIGINS` and `GOOGLE_REDIRECT_URI` as environment variables. Keep `DATABASE_URL`, `JWT_SECRET_KEY`, `SMTP_PASSWORD`, `TOKEN_ENCRYPTION_KEY`, `B2_APPLICATION_KEY` and the Google secrets in Secret Manager.
+- Cloud Run limits a request to 60 minutes, limits an HTTP/1 request body to 32 MiB (an HTTP/2 server has no such limit), and keeps its writable filesystem in memory. Library uploads of up to 500 MB therefore need an HTTP/2 end-to-end setup on Cloud Run, or direct browser uploads to B2 (see the roadmap). Check this before going live.
 - A channel sync and the AI report run inside the API process after the response is sent, so they also need CPU while no request is running. Use always-allocated CPU or a minimum of one instance, as for the upload worker. A sync that is interrupted is marked failed after 15 minutes and can be started again.
 - The upload worker needs CPU while no request is running. Run it as its own service with CPU always allocated (`python -m app.workers.yt_channel_management`) and set `yt_upload_worker_enabled` to `False` for the API service, or use a Cloud Run service with minimum one instance and always-on CPU.
 - A Dockerfile is still to be written.
@@ -498,7 +522,7 @@ Fixed values live in `app/config.py`. The ones most often changed:
 
 ## Roadmap
 
-- Resumable browser uploads straight to storage for large videos.
+- Resumable browser uploads straight to B2 with presigned multipart URLs for large videos (needs CORS rules on the bucket).
 - Per-channel title and description overrides in one upload.
 - Scheduled publishing across channels with different times.
 - Rate limiting on login, signup and forgot-password.
@@ -507,7 +531,7 @@ Fixed values live in `app/config.py`. The ones most often changed:
 - Competitor benchmarking from public channel data.
 - Structured logging and error monitoring.
 - Alembic migrations once tables change often.
-- Rotate every credential that was shared during development: database password, JWT secret, Gmail app password.
+- Rotate every credential that was shared during development: database password, JWT secret, Gmail app password, B2 keys.
 
 ## Code conventions
 
