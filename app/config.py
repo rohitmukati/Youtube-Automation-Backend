@@ -19,8 +19,6 @@ class Settings(BaseSettings):
     )
 
     app_name: ClassVar[str] = "Youtube Automation Backend"
-    app_env: ClassVar[str] = "development"
-    debug: ClassVar[bool] = True
     log_level: ClassVar[str] = "INFO"
     log_sql: ClassVar[bool] = False
     api_v1_prefix: ClassVar[str] = "/api/v1"
@@ -45,28 +43,18 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: ClassVar[int] = 15
     smtp_from_name: ClassVar[str] = "Youtube Automation"
 
+    storage_region: ClassVar[str] = "auto"
     storage_signed_url_ttl_seconds: ClassVar[int] = 3600
     storage_signed_url_max_ttl_seconds: ClassVar[int] = 7 * 24 * 3600
     storage_request_timeout_seconds: ClassVar[int] = 30
     storage_upload_timeout_seconds: ClassVar[int] = 600
     storage_connect_timeout_seconds: ClassVar[int] = 10
     storage_max_attempts: ClassVar[int] = 3
-    storage_max_pool_connections: ClassVar[int] = 32
+    storage_max_pool_connections: ClassVar[int] = 64
     storage_multipart_chunk_bytes: ClassVar[int] = 8 * 1024 * 1024
     storage_multipart_concurrency: ClassVar[int] = 4
     storage_multipart_buffered_chunks: ClassVar[int] = 6
-    storage_b2_endpoint_pattern: ClassVar[str] = r"^s3\.([a-z0-9-]+)\.backblazeb2\.com$"
-    storage_fallback_region: ClassVar[str] = "us-east-1"
-    storage_video_max_bytes: ClassVar[int] = 500 * 1024 * 1024
     storage_image_max_bytes: ClassVar[int] = 10 * 1024 * 1024
-    storage_video_content_types: ClassVar[List[str]] = [
-        "video/mp4",
-        "video/quicktime",
-        "video/x-msvideo",
-        "video/x-matroska",
-        "video/webm",
-        "video/mpeg",
-    ]
     storage_image_content_types: ClassVar[List[str]] = [
         "image/jpeg",
         "image/png",
@@ -78,22 +66,63 @@ class Settings(BaseSettings):
     storage_list_default_limit: ClassVar[int] = 20
     storage_list_max_limit: ClassVar[int] = 100
 
+    media_video_max_bytes: ClassVar[int] = int(1.5 * 1024 * 1024 * 1024)
+    media_video_content_types: ClassVar[List[str]] = [
+        "video/mp4",
+        "video/quicktime",
+        "video/x-msvideo",
+        "video/x-matroska",
+        "video/webm",
+        "video/mpeg",
+    ]
+    media_video_extensions: ClassVar[List[str]] = [
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".webm",
+        ".mpeg",
+        ".mpg",
+    ]
+    media_staging_prefix: ClassVar[str] = "staging"
+    media_part_size_bytes: ClassVar[int] = 16 * 1024 * 1024
+    media_min_part_size_bytes: ClassVar[int] = 5 * 1024 * 1024
+    media_max_parts: ClassVar[int] = 10000
+    media_part_url_ttl_seconds: ClassVar[int] = 6 * 3600
+    media_client_parallel_parts: ClassVar[int] = 4
+    media_retention_hours: ClassVar[int] = 24
+    media_upload_window_hours: ClassVar[int] = 12
+    media_max_active_per_user: ClassVar[int] = 5
+    media_max_staged_bytes_total: ClassVar[int] = 8 * 1024 * 1024 * 1024
+    media_reaper_interval_seconds: ClassVar[int] = 300
+    media_reaper_batch_size: ClassVar[int] = 50
+    media_signature_probe_bytes: ClassVar[int] = 32
+    media_file_name_max_length: ClassVar[int] = 255
+
     yt_upload_max_accounts: ClassVar[int] = 50
-    yt_upload_max_attempts: ClassVar[int] = 3
-    yt_upload_retry_delays_seconds: ClassVar[List[int]] = [30, 120]
-    yt_upload_chunk_bytes: ClassVar[int] = 8 * 1024 * 1024
-    yt_upload_chunk_retries: ClassVar[int] = 3
-    yt_upload_concurrency: ClassVar[int] = 3
+    yt_upload_max_attempts: ClassVar[int] = 6
+    yt_upload_retry_delays_seconds: ClassVar[List[int]] = [20, 60, 180, 300, 600]
+    yt_upload_api_url: ClassVar[str] = "https://www.googleapis.com/upload/youtube/v3/videos"
+    yt_upload_chunk_bytes: ClassVar[int] = 16 * 1024 * 1024
+    yt_upload_chunk_alignment_bytes: ClassVar[int] = 256 * 1024
+    yt_upload_chunk_retries: ClassVar[int] = 5
+    yt_upload_chunk_backoff_seconds: ClassVar[float] = 2.0
+    yt_upload_chunk_backoff_max_seconds: ClassVar[float] = 30.0
+    yt_upload_http_timeout_seconds: ClassVar[int] = 300
+    yt_upload_concurrency: ClassVar[int] = 10
     yt_upload_daily_limit: ClassVar[int] = 100
     yt_upload_quota_timezone: ClassVar[str] = "America/Los_Angeles"
     yt_upload_worker_enabled: ClassVar[bool] = True
     yt_upload_worker_poll_seconds: ClassVar[int] = 3
     yt_upload_worker_shutdown_seconds: ClassVar[int] = 60
-    yt_upload_stale_after_seconds: ClassVar[int] = 600
-    yt_upload_stale_sweep_seconds: ClassVar[int] = 60
-    yt_upload_source_url_ttl_seconds: ClassVar[int] = 6 * 3600
+    yt_upload_heartbeat_seconds: ClassVar[int] = 15
     yt_upload_progress_interval_seconds: ClassVar[int] = 3
+    yt_upload_stale_after_seconds: ClassVar[int] = 120
+    yt_upload_stale_sweep_seconds: ClassVar[int] = 30
+    yt_upload_source_url_ttl_seconds: ClassVar[int] = 12 * 3600
     yt_upload_range_timeout_seconds: ClassVar[int] = 60
+    yt_upload_range_retries: ClassVar[int] = 4
     yt_upload_error_max_length: ClassVar[int] = 500
     yt_title_max_length: ClassVar[int] = 100
     yt_description_max_bytes: ClassVar[int] = 5000
@@ -186,10 +215,15 @@ class Settings(BaseSettings):
     smtp_username: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
 
-    b2_endpoint_url: Optional[str] = None
-    b2_bucket_name: Optional[str] = None
-    b2_key_id: Optional[str] = None
-    b2_application_key: Optional[SecretStr] = None
+    # APP_ENV=production turns off the interactive docs and debug behaviour
+    app_env: str = "development"
+
+    # Cloudflare R2 (S3 compatible). R2_ENDPOINT_URL is optional when R2_ACCOUNT_ID is set.
+    r2_account_id: Optional[str] = None
+    r2_endpoint_url: Optional[str] = None
+    r2_bucket_name: Optional[str] = None
+    r2_access_key_id: Optional[str] = None
+    r2_secret_access_key: Optional[SecretStr] = None
 
     token_encryption_key: Optional[SecretStr] = None
 
@@ -257,7 +291,33 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        return self.app_env.lower() == "production"
+        return self.app_env.strip().lower() == "production"
+
+    @property
+    def debug(self) -> bool:
+        return not self.is_production
+
+    @property
+    def r2_endpoint(self) -> Optional[str]:
+        explicit = (self.r2_endpoint_url or "").strip().rstrip("/")
+        if explicit:
+            return explicit
+        account = (self.r2_account_id or "").strip()
+        return f"https://{account}.r2.cloudflarestorage.com" if account else None
+
+    @property
+    def r2_configured(self) -> bool:
+        return bool(
+            self.r2_endpoint
+            and (self.r2_bucket_name or "").strip()
+            and (self.r2_access_key_id or "").strip()
+            and self.r2_secret_access_key
+            and self.r2_secret_access_key.get_secret_value().strip()
+        )
+
+    @property
+    def media_part_count_limit(self) -> int:
+        return self.media_max_parts
 
     @property
     def smtp_from_email(self) -> Optional[str]:
@@ -275,8 +335,23 @@ class Settings(BaseSettings):
             and self.smtp_password.get_secret_value()
         )
 
+def _check_fixed_values() -> None:
+    problems = []
+    if Settings.yt_upload_chunk_bytes % Settings.yt_upload_chunk_alignment_bytes:
+        problems.append("yt_upload_chunk_bytes must be a multiple of 256 KiB")
+    if Settings.media_part_size_bytes < Settings.media_min_part_size_bytes:
+        problems.append("media_part_size_bytes must be at least media_min_part_size_bytes")
+    if Settings.media_video_max_bytes > Settings.media_part_size_bytes * Settings.media_max_parts:
+        problems.append("media_video_max_bytes does not fit in media_max_parts parts")
+    if len(Settings.yt_upload_retry_delays_seconds) < 1:
+        problems.append("yt_upload_retry_delays_seconds cannot be empty")
+    if problems:
+        raise RuntimeError("Invalid fixed settings: " + "; ".join(problems))
+
+
 @lru_cache
 def get_settings() -> Settings:
+    _check_fixed_values()
     try:
         return Settings()
     except ValidationError as exc:

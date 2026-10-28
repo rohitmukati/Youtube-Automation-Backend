@@ -204,3 +204,31 @@ class GoogleApiNotEnabledError(BadRequestError):
         "A required Google API is not enabled in your Google Cloud project. "
         "Enable it in the API Library and connect again."
     )
+
+
+class UploadSessionGoneError(NotFoundError):
+    code = "upload_session_gone"
+    message = "This upload is no longer available. Please start the upload again."
+
+
+class UploadIncompleteError(ValidationError):
+    code = "upload_incomplete"
+    message = "The upload is not complete yet. Some parts are missing or have the wrong size."
+
+
+class MediaNotReadyError(ConflictError):
+    code = "media_not_ready"
+    message = "The video file is still being uploaded."
+
+
+class MediaExpiredError(ConflictError):
+    code = "media_expired"
+    message = (
+        "The video file was removed from our servers after 24 hours. "
+        "Start a new upload with the file to publish it again."
+    )
+
+
+class StagingBusyError(ServiceUnavailableError):
+    code = "staging_busy"
+    message = "Uploads are very busy right now. Please try again in a few minutes."

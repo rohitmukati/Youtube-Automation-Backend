@@ -1,7 +1,6 @@
 # app/utils/bucket.py
 import asyncio
 import logging
-import re
 import threading
 from dataclasses import dataclass
 from typing import BinaryIO, Optional
@@ -24,7 +23,10 @@ from s3transfer.exceptions import RetriesExceededError
 from app.config import settings
 from app.core.exceptions import (
     AppException,
+    NotFoundError,
     ServiceUnavailableError,
+    UploadIncompleteError,
+    UploadSessionGoneError,
     ValidationError,
 )
 
@@ -60,6 +62,10 @@ _TEMPORARY_ERROR_CODES = frozenset(
         "ThrottlingException",
     }
 )
+_INCOMPLETE_ERROR_CODES = frozenset(
+    {"InvalidPart", "InvalidPartOrder", "EntityTooSmall", "MalformedXML"}
+)
+_MISSING_OBJECT_CODES = frozenset({"NoSuchKey", "NotFound", "404"})
 _CONNECTION_ERRORS = (BotoConnectionError, HTTPClientError, IncompleteReadError)
 _STORAGE_ERRORS = (
     BotoCoreError,
@@ -73,6 +79,19 @@ _client_lock = threading.Lock()
 _clients: dict[tuple, BaseClient] = {}
 _bucket_lock = threading.Lock()
 _verified_buckets: set[tuple[str, str]] = set()
+
+
+@dataclass(frozen=True)
+class PartInfo:
+    part_number: int
+    size: int
+    etag: str
+
+
+@dataclass(frozen=True)
+class ObjectInfo:
+    size: int
+    content_type: str
 
 
 @dataclass(frozen=True)
@@ -90,27 +109,21 @@ class _Handle:
 
 
 def _target() -> _Target:
-    endpoint = (settings.b2_endpoint_url or "").strip().rstrip("/")
-    bucket = (settings.b2_bucket_name or "").strip()
-    key_id = (settings.b2_key_id or "").strip()
+    endpoint = settings.r2_endpoint or ""
+    bucket = (settings.r2_bucket_name or "").strip()
+    key_id = (settings.r2_access_key_id or "").strip()
     secret = (
-        settings.b2_application_key.get_secret_value().strip()
-        if settings.b2_application_key is not None
+        settings.r2_secret_access_key.get_secret_value().strip()
+        if settings.r2_secret_access_key is not None
         else ""
     )
     if not (endpoint and bucket and key_id and secret):
         raise ServiceUnavailableError(_NOT_CONFIGURED)
     parsed = urlparse(endpoint)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        logger.error("B2_ENDPOINT_URL is not a valid http or https URL.")
+        logger.error("R2_ENDPOINT_URL is not a valid http or https URL.")
         raise ServiceUnavailableError(_NOT_CONFIGURED)
     return _Target(endpoint=endpoint, bucket=bucket, key_id=key_id, secret=secret)
-
-
-def _region_for(endpoint: str) -> str:
-    host = urlparse(endpoint).hostname or ""
-    match = re.match(settings.storage_b2_endpoint_pattern, host)
-    return match.group(1) if match else settings.storage_fallback_region
 
 
 def _build_client(target: _Target, kind: str) -> BaseClient:
@@ -132,7 +145,7 @@ def _build_client(target: _Target, kind: str) -> BaseClient:
     return boto3.client(
         "s3",
         endpoint_url=target.endpoint,
-        region_name=_region_for(target.endpoint),
+        region_name=settings.storage_region,
         aws_access_key_id=target.key_id,
         aws_secret_access_key=target.secret,
         config=config,
@@ -180,12 +193,18 @@ def _translate(exc: BaseException, action: str) -> AppException:
 
     if isinstance(exc, ClientError):
         code, status = _error_details(exc)
+        if code == "NoSuchUpload":
+            return UploadSessionGoneError()
+        if code in _INCOMPLETE_ERROR_CODES:
+            return UploadIncompleteError()
         if code == "EntityTooLarge" or status == 413:
             return ValidationError(_TOO_LARGE)
+        if code in _MISSING_OBJECT_CODES or (status == 404 and code != "NoSuchBucket"):
+            return NotFoundError("The stored file was not found.")
         if code in _CONFIG_ERROR_CODES or status in (401, 403):
             logger.error(
-                "Storage %s was rejected (code=%s, status=%s). Check the B2 key, "
-                "its bucket access and the Caps & Alerts page.",
+                "Storage %s was rejected (code=%s, status=%s). Check the R2 token, "
+                "its bucket access and the bucket name.",
                 action,
                 code or "unknown",
                 status,
@@ -226,7 +245,10 @@ def _ensure_bucket_sync() -> None:
         except ClientError as exc:
             code, status = _error_details(exc)
             if status == 404 or code in ("404", "NoSuchBucket"):
-                logger.error("The B2 bucket %s does not exist or is not visible to the key.", handle.bucket)
+                logger.error(
+                    "The R2 bucket %s does not exist or is not visible to the token.",
+                    handle.bucket,
+                )
                 raise ServiceUnavailableError(_NOT_CONFIGURED) from exc
             try:
                 handle.client.list_objects_v2(Bucket=handle.bucket, MaxKeys=1)
@@ -237,42 +259,15 @@ def _ensure_bucket_sync() -> None:
         _verified_buckets.add(marker)
 
 
-def _list_version_ids(handle: _Handle, path: str) -> list[str]:
-    response = handle.client.list_object_versions(
-        Bucket=handle.bucket, Prefix=path, MaxKeys=1000
-    )
-    items = list(response.get("Versions") or []) + list(response.get("DeleteMarkers") or [])
-    return [
-        str(item["VersionId"])
-        for item in items
-        if item.get("Key") == path and item.get("VersionId")
-    ]
-
-
 def _delete_sync(path: str) -> None:
     handle = _open()
     try:
-        version_ids: Optional[list[str]] = _list_version_ids(handle, path)
-    except _STORAGE_ERRORS as exc:
-        logger.warning(
-            "Could not list stored versions during delete, using a plain delete: %s",
-            type(exc).__name__,
-        )
-        version_ids = None
-
-    try:
-        if version_ids:
-            for version_id in version_ids:
-                try:
-                    handle.client.delete_object(
-                        Bucket=handle.bucket, Key=path, VersionId=version_id
-                    )
-                except ClientError as exc:
-                    _, status = _error_details(exc)
-                    if status != 404:
-                        raise
-        else:
-            handle.client.delete_object(Bucket=handle.bucket, Key=path)
+        handle.client.delete_object(Bucket=handle.bucket, Key=path)
+    except ClientError as exc:
+        _, status = _error_details(exc)
+        if status == 404:
+            return
+        raise _translate(exc, "delete") from exc
     except _STORAGE_ERRORS as exc:
         raise _translate(exc, "delete") from exc
 
@@ -282,6 +277,23 @@ def _delete_after_failure(path: str) -> None:
         _delete_sync(path)
     except AppException:
         logger.warning("Could not remove a partly stored object after a failed upload.")
+
+
+def _head_sync(path: str) -> Optional[ObjectInfo]:
+    handle = _open()
+    try:
+        head = handle.client.head_object(Bucket=handle.bucket, Key=path)
+    except ClientError as exc:
+        code, status = _error_details(exc)
+        if status == 404 or code in _MISSING_OBJECT_CODES:
+            return None
+        raise _translate(exc, "file check") from exc
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "file check") from exc
+    return ObjectInfo(
+        size=int(head.get("ContentLength") or 0),
+        content_type=str(head.get("ContentType") or ""),
+    )
 
 
 def _verify_upload(handle: _Handle, path: str, size: int) -> None:
@@ -320,28 +332,136 @@ def _upload_sync(path: str, fileobj: BinaryIO, content_type: str, size: int) -> 
     _verify_upload(handle, path, size)
 
 
-def _presign(handle: _Handle, path: str, expires_in: int) -> str:
+def _presign(handle: _Handle, method: str, params: dict, expires_in: int) -> str:
     ttl = max(1, min(int(expires_in), settings.storage_signed_url_max_ttl_seconds))
     try:
         return handle.client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": handle.bucket, "Key": path},
+            method,
+            Params={"Bucket": handle.bucket, **params},
             ExpiresIn=ttl,
-            HttpMethod="GET",
         )
     except _STORAGE_ERRORS as exc:
         raise _translate(exc, "signed url") from exc
 
 
 def _create_signed_url_sync(path: str, expires_in: int) -> str:
-    return _presign(_open(), path, expires_in)
+    return _presign(_open(), "get_object", {"Key": path}, expires_in)
 
 
 def _create_signed_urls_sync(paths: list[str], expires_in: int) -> dict[str, str]:
     if not paths:
         return {}
     handle = _open()
-    return {path: _presign(handle, path, expires_in) for path in paths}
+    return {
+        path: _presign(handle, "get_object", {"Key": path}, expires_in) for path in paths
+    }
+
+
+def _create_multipart_sync(path: str, content_type: str) -> str:
+    handle = _open()
+    try:
+        response = handle.client.create_multipart_upload(
+            Bucket=handle.bucket, Key=path, ContentType=content_type
+        )
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "start upload") from exc
+    upload_id = response.get("UploadId")
+    if not upload_id:
+        logger.error("Storage did not return an upload id.")
+        raise ServiceUnavailableError(_REQUEST_FAILED)
+    return str(upload_id)
+
+
+def _create_part_urls_sync(
+    path: str, upload_id: str, part_numbers: list[int], expires_in: int
+) -> dict[int, str]:
+    handle = _open()
+    return {
+        number: _presign(
+            handle,
+            "upload_part",
+            {"Key": path, "UploadId": upload_id, "PartNumber": number},
+            expires_in,
+        )
+        for number in part_numbers
+    }
+
+
+def _list_parts_sync(path: str, upload_id: str) -> list[PartInfo]:
+    handle = _open()
+    parts: list[PartInfo] = []
+    marker = 0
+    try:
+        while True:
+            response = handle.client.list_parts(
+                Bucket=handle.bucket,
+                Key=path,
+                UploadId=upload_id,
+                MaxParts=1000,
+                PartNumberMarker=marker,
+            )
+            for item in response.get("Parts") or []:
+                parts.append(
+                    PartInfo(
+                        part_number=int(item["PartNumber"]),
+                        size=int(item["Size"]),
+                        etag=str(item["ETag"]),
+                    )
+                )
+            if not response.get("IsTruncated"):
+                break
+            marker = int(response.get("NextPartNumberMarker") or 0)
+            if marker <= 0:
+                break
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "list parts") from exc
+    return sorted(parts, key=lambda part: part.part_number)
+
+
+def _complete_multipart_sync(path: str, upload_id: str, parts: list[PartInfo]) -> None:
+    handle = _open()
+    try:
+        handle.client.complete_multipart_upload(
+            Bucket=handle.bucket,
+            Key=path,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"ETag": part.etag, "PartNumber": part.part_number}
+                    for part in sorted(parts, key=lambda item: item.part_number)
+                ]
+            },
+        )
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "finish upload") from exc
+
+
+def _abort_multipart_sync(path: str, upload_id: str) -> None:
+    handle = _open()
+    try:
+        handle.client.abort_multipart_upload(
+            Bucket=handle.bucket, Key=path, UploadId=upload_id
+        )
+    except ClientError as exc:
+        code, status = _error_details(exc)
+        if code == "NoSuchUpload" or status == 404:
+            return
+        raise _translate(exc, "cancel upload") from exc
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "cancel upload") from exc
+
+
+def _read_range_sync(path: str, start: int, length: int) -> bytes:
+    handle = _open()
+    if length <= 0:
+        return b""
+    try:
+        response = handle.client.get_object(
+            Bucket=handle.bucket, Key=path, Range=f"bytes={start}-{start + length - 1}"
+        )
+        return response["Body"].read()
+    except _STORAGE_ERRORS as exc:
+        raise _translate(exc, "read") from exc
 
 
 async def ensure_bucket() -> None:
@@ -356,6 +476,10 @@ async def delete_object(path: str) -> None:
     await asyncio.to_thread(_delete_sync, path)
 
 
+async def head_object(path: str) -> Optional[ObjectInfo]:
+    return await asyncio.to_thread(_head_sync, path)
+
+
 async def create_signed_url(path: str, expires_in: Optional[int] = None) -> str:
     ttl = expires_in or settings.storage_signed_url_ttl_seconds
     return await asyncio.to_thread(_create_signed_url_sync, path, ttl)
@@ -366,3 +490,30 @@ async def create_signed_urls(
 ) -> dict[str, str]:
     ttl = expires_in or settings.storage_signed_url_ttl_seconds
     return await asyncio.to_thread(_create_signed_urls_sync, paths, ttl)
+
+
+async def create_multipart_upload(path: str, content_type: str) -> str:
+    return await asyncio.to_thread(_create_multipart_sync, path, content_type)
+
+
+async def create_part_urls(
+    path: str, upload_id: str, part_numbers: list[int], expires_in: Optional[int] = None
+) -> dict[int, str]:
+    ttl = expires_in or settings.media_part_url_ttl_seconds
+    return await asyncio.to_thread(_create_part_urls_sync, path, upload_id, part_numbers, ttl)
+
+
+async def list_parts(path: str, upload_id: str) -> list[PartInfo]:
+    return await asyncio.to_thread(_list_parts_sync, path, upload_id)
+
+
+async def complete_multipart_upload(path: str, upload_id: str, parts: list[PartInfo]) -> None:
+    await asyncio.to_thread(_complete_multipart_sync, path, upload_id, parts)
+
+
+async def abort_multipart_upload(path: str, upload_id: str) -> None:
+    await asyncio.to_thread(_abort_multipart_sync, path, upload_id)
+
+
+async def read_range(path: str, start: int, length: int) -> bytes:
+    return await asyncio.to_thread(_read_range_sync, path, start, length)

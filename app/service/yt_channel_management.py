@@ -4,17 +4,25 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import (
+    AppException,
+    MediaExpiredError,
+    NotFoundError,
+    ValidationError,
+)
 from app.crud import storage_bucket as storage_crud
 from app.crud import yt_channel_management as crud
+from app.crud import yt_media_upload as media_crud
 from app.models.storage_bucket import StorageFile, StorageFileType
 from app.models.yt_channel_management import YtUploadJob, YtUploadTarget
-from app.service.google_credentials import ensure_configured
+from app.models.yt_media_upload import YtMediaAsset
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
+    StartUploadResponse,
     UploadChannelBrief,
     UploadJobDetail,
     UploadJobListItem,
@@ -22,7 +30,10 @@ from app.schemas.yt_channel_management import (
     UploadQuotaResponse,
     UploadTargetResponse,
 )
-from app.utils.datetime_utils import utc_now
+from app.schemas.yt_media_upload import MediaStateResponse
+from app.service.google_credentials import ensure_configured
+from app.service.yt_media_upload import YtMediaUploadService
+from app.utils.datetime_utils import ensure_utc, utc_now
 from app.utils.yt_channel_management import (
     ACTIVE_TARGET_STATUSES,
     UploadJobStatus,
@@ -30,11 +41,12 @@ from app.utils.yt_channel_management import (
     next_quota_reset,
     quota_day,
 )
+from app.utils.yt_media_upload import MediaAssetStatus
 
 logger = logging.getLogger(__name__)
 
 
-def _summary_data(job: YtUploadJob) -> dict:
+def _summary_data(job: YtUploadJob, asset: Optional[YtMediaAsset]) -> dict:
     counts = {status.value: 0 for status in UploadTargetStatus}
     for target in job.targets:
         counts[target.status] = counts.get(target.status, 0) + 1
@@ -43,7 +55,8 @@ def _summary_data(job: YtUploadJob) -> dict:
         "status": job.status,
         "title": job.title,
         "privacy_status": job.privacy_status,
-        "storage_file_id": job.storage_file_id,
+        "media_status": asset.status if asset is not None else None,
+        "media_expires_at": asset.expires_at if asset is not None else None,
         "source_file_name": job.source_file_name,
         "source_size_bytes": job.source_size_bytes,
         "total_channels": len(job.targets),
@@ -57,10 +70,12 @@ def _summary_data(job: YtUploadJob) -> dict:
 
 
 def _to_list_item(
-    job: YtUploadJob, emails: dict[uuid.UUID, Optional[str]]
+    job: YtUploadJob,
+    emails: dict[uuid.UUID, Optional[str]],
+    assets: dict[uuid.UUID, YtMediaAsset],
 ) -> UploadJobListItem:
     return UploadJobListItem(
-        **_summary_data(job),
+        **_summary_data(job, assets.get(job.media_asset_id)),
         channels=[
             UploadChannelBrief(
                 account_id=target.account_id,
@@ -84,10 +99,12 @@ def _to_target(
 
 
 def _to_detail(
-    job: YtUploadJob, emails: dict[uuid.UUID, Optional[str]]
+    job: YtUploadJob,
+    emails: dict[uuid.UUID, Optional[str]],
+    asset: Optional[YtMediaAsset],
 ) -> UploadJobDetail:
     return UploadJobDetail(
-        **_summary_data(job),
+        **_summary_data(job, asset),
         description=job.description,
         tags=list(job.tags or []),
         category_id=job.category_id,
@@ -105,40 +122,112 @@ def _to_detail(
 class YtChannelManagementService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self._media = YtMediaUploadService(session)
 
     async def create_upload(
         self, user_id: uuid.UUID, payload: CreateUploadRequest
-    ) -> UploadJobDetail:
+    ) -> StartUploadResponse:
         await ensure_configured(self._session, user_id)
-        source = await self._get_video(user_id, payload.storage_file_id)
+
+        if payload.client_request_id:
+            existing = await crud.get_job_by_request(
+                self._session, user_id, payload.client_request_id
+            )
+            if existing is not None:
+                return await self._reuse(existing)
+
         thumbnail = await self._get_thumbnail(user_id, payload.thumbnail_file_id)
         accounts = await self._get_uploadable_accounts(user_id, payload.account_ids)
         await self._ensure_quota(user_id, len(accounts))
 
-        job = await crud.create_job(
-            self._session,
-            user_id=user_id,
-            source_file=source,
-            thumbnail_file=thumbnail,
-            title=payload.title,
-            description=payload.description,
-            tags=payload.tags,
-            category_id=payload.category_id,
-            privacy_status=payload.privacy_status.value,
-            publish_at=payload.publish_at,
-            made_for_kids=payload.made_for_kids,
-            default_language=payload.default_language,
-            notify_subscribers=payload.notify_subscribers,
-            accounts=[accounts[account_id] for account_id in payload.account_ids],
-        )
-        await self._session.commit()
+        asset = await self._media.start_session(user_id, payload.file)
+        try:
+            job = await crud.create_job(
+                self._session,
+                user_id=user_id,
+                asset=asset,
+                client_request_id=payload.client_request_id,
+                thumbnail_file=thumbnail,
+                title=payload.title,
+                description=payload.description,
+                tags=payload.tags,
+                category_id=payload.category_id,
+                privacy_status=payload.privacy_status.value,
+                publish_at=payload.publish_at,
+                made_for_kids=payload.made_for_kids,
+                default_language=payload.default_language,
+                notify_subscribers=payload.notify_subscribers,
+                accounts=[accounts[account_id] for account_id in payload.account_ids],
+            )
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            await self._media.abort_quietly(asset.object_key, asset.upload_id)
+            if payload.client_request_id:
+                existing = await crud.get_job_by_request(
+                    self._session, user_id, payload.client_request_id
+                )
+                if existing is not None:
+                    return await self._reuse(existing)
+            raise
+        except Exception:
+            await self._session.rollback()
+            await self._media.abort_quietly(asset.object_key, asset.upload_id)
+            raise
+
         logger.info(
-            "Upload job %s created by user %s for %s channels",
+            "Upload job %s created by user %s for %s channels (%s bytes)",
             job.id,
             user_id,
             len(job.targets),
+            asset.size_bytes,
         )
-        return _to_detail(job, await self._load_emails([job]))
+        info = await self._media.upload_info(asset, known_parts=[])
+        return StartUploadResponse(
+            job=_to_detail(job, await self._load_emails([job]), asset), upload=info
+        )
+
+    async def _reuse(self, job: YtUploadJob) -> StartUploadResponse:
+        asset = await self._asset_of(job)
+        info = None
+        if asset is not None and asset.status == MediaAssetStatus.UPLOADING.value:
+            info = await self._media.upload_info(asset)
+        return StartUploadResponse(
+            job=_to_detail(job, await self._load_emails([job]), asset),
+            upload=info,
+            reused=True,
+        )
+
+    async def get_media_state(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> MediaStateResponse:
+        job = await self._get_job(user_id, job_id)
+        asset = await self._asset_of(job)
+        if asset is None:
+            return MediaStateResponse(job_id=job.id)
+        info = await self._media.upload_info(asset)
+        return MediaStateResponse(
+            job_id=job.id,
+            media_status=asset.status,
+            media_expires_at=asset.expires_at,
+            upload=info,
+        )
+
+    async def complete_media(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> UploadJobDetail:
+        job = await self._get_job(user_id, job_id)
+        if job.media_asset_id is None:
+            raise MediaExpiredError()
+        if job.status == UploadJobStatus.CANCELLED.value:
+            raise ValidationError("This upload was cancelled.")
+        asset = await self._media.finalize(job.media_asset_id)
+        await self._session.commit()
+        await crud.refresh_job_status(self._session, job.id)
+        await self._session.commit()
+        logger.info("Upload job %s media is ready", job.id)
+        fresh = await self._get_job(user_id, job_id)
+        return _to_detail(fresh, await self._load_emails([fresh]), asset)
 
     async def _load_emails(
         self, jobs: list[YtUploadJob]
@@ -150,6 +239,11 @@ class YtChannelManagementService:
             if target.account_id is not None
         }
         return await crud.get_account_emails(self._session, list(account_ids))
+
+    async def _asset_of(self, job: YtUploadJob) -> Optional[YtMediaAsset]:
+        if job.media_asset_id is None:
+            return None
+        return await media_crud.get_asset(self._session, job.media_asset_id)
 
     async def list_uploads(
         self,
@@ -175,8 +269,11 @@ class YtChannelManagementService:
             offset=offset,
         )
         emails = await self._load_emails(list(jobs))
+        assets = await media_crud.get_assets_by_ids(
+            self._session, [job.media_asset_id for job in jobs if job.media_asset_id]
+        )
         return UploadJobListResponse(
-            jobs=[_to_list_item(job, emails) for job in jobs],
+            jobs=[_to_list_item(job, emails, assets) for job in jobs],
             total=total,
             limit=limit,
             offset=offset,
@@ -184,7 +281,7 @@ class YtChannelManagementService:
 
     async def get_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
-        return _to_detail(job, await self._load_emails([job]))
+        return _to_detail(job, await self._load_emails([job]), await self._asset_of(job))
 
     async def retry_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
         await ensure_configured(self._session, user_id)
@@ -196,11 +293,14 @@ class YtChannelManagementService:
         ]
         if not failed:
             raise ValidationError("There are no failed channels to retry.")
-        if job.storage_file_id is None:
-            raise ValidationError(
-                "The video was removed from your library, so this upload cannot be retried. "
-                "Upload the video again and start a new upload."
-            )
+
+        asset = await self._asset_of(job)
+        if (
+            asset is None
+            or asset.status != MediaAssetStatus.READY.value
+            or (asset.expires_at is not None and ensure_utc(asset.expires_at) <= utc_now())
+        ):
+            raise MediaExpiredError()
 
         accounts = await crud.get_accounts_by_ids(
             self._session,
@@ -225,11 +325,12 @@ class YtChannelManagementService:
             [target.id for target in retryable],
             has_thumbnail=job.thumbnail_file_id is not None,
         )
+        await self._session.commit()
         await crud.refresh_job_status(self._session, job.id)
         await self._session.commit()
         logger.info("Retrying %s channels of upload job %s", len(retryable), job.id)
         fresh = await self._get_job(user_id, job_id)
-        return _to_detail(fresh, await self._load_emails([fresh]))
+        return _to_detail(fresh, await self._load_emails([fresh]), asset)
 
     async def cancel_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
@@ -238,11 +339,24 @@ class YtChannelManagementService:
         )
         if cancelled == 0:
             raise ValidationError("This upload has already finished.")
-        await crud.refresh_job_status(self._session, job.id)
+        await self._session.commit()
+        new_status = await crud.refresh_job_status(self._session, job.id)
         await self._session.commit()
         logger.info("Upload job %s cancelled (%s channels)", job.id, cancelled)
+
+        if new_status is UploadJobStatus.CANCELLED and job.media_asset_id is not None:
+            await self._discard_quietly(job.media_asset_id)
+
         fresh = await self._get_job(user_id, job_id)
-        return _to_detail(fresh, await self._load_emails([fresh]))
+        return _to_detail(fresh, await self._load_emails([fresh]), await self._asset_of(fresh))
+
+    async def _discard_quietly(self, asset_id: uuid.UUID) -> None:
+        try:
+            await self._media.discard(asset_id)
+            await self._session.commit()
+        except AppException:
+            await self._session.rollback()
+            logger.warning("Could not remove the file of cancelled upload (asset %s)", asset_id)
 
     async def get_quota(self, user_id: uuid.UUID) -> UploadQuotaResponse:
         now = utc_now()
@@ -262,14 +376,6 @@ class YtChannelManagementService:
         if job is None:
             raise NotFoundError("Upload not found.")
         return job
-
-    async def _get_video(self, user_id: uuid.UUID, file_id: uuid.UUID) -> StorageFile:
-        record = await storage_crud.get_file(self._session, file_id, user_id)
-        if record is None:
-            raise NotFoundError("The selected video was not found in your library.")
-        if record.file_type != StorageFileType.VIDEO.value:
-            raise ValidationError("The selected file is not a video.")
-        return record
 
     async def _get_thumbnail(
         self, user_id: uuid.UUID, file_id: Optional[uuid.UUID]

@@ -30,6 +30,11 @@ from app.utils.yt_channel_management import (
 
 class YtUploadJob(TimestampMixin, Base):
     __tablename__ = "yt_upload_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "client_request_id", name="uq_yt_upload_jobs_user_request"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -39,11 +44,13 @@ class YtUploadJob(TimestampMixin, Base):
         nullable=False,
     )
 
-    storage_file_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    media_asset_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         Uuid,
-        ForeignKey("storage_files.id", ondelete="SET NULL"),
+        ForeignKey("yt_media_assets.id", ondelete="SET NULL"),
+        index=True,
         nullable=True,
     )
+    client_request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     source_file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     source_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -114,6 +121,12 @@ class YtUploadTarget(TimestampMixin, Base):
     )
     locked_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    lease_token: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+    resumable_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bytes_confirmed: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
     )
 
     youtube_video_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)

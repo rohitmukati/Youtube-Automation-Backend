@@ -18,6 +18,7 @@ class PrivacyStatus(str, enum.Enum):
 
 
 class UploadJobStatus(str, enum.Enum):
+    UPLOADING_MEDIA = "uploading_media"
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -60,6 +61,7 @@ class UploadFailure:
     retryable: bool = False
     stop_all: bool = False
     needs_reconnect: bool = False
+    reached_server: bool = True
 
 
 class UploadFailureError(Exception):

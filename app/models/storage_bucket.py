@@ -1,3 +1,4 @@
+# app/models/storage_bucket.py
 import enum
 import uuid
 
@@ -8,7 +9,6 @@ from app.models.base import Base, TimestampMixin
 
 
 class StorageFileType(str, enum.Enum):
-    VIDEO = "video"
     IMAGE = "image"
 
 

@@ -16,11 +16,13 @@ from app.models.yt_channel_management import (
     YtUploadTarget,
 )
 from app.models.yt_management import OAuthState, YouTubeAccount
+from app.models.yt_media_upload import YtMediaAsset
 
 __all__ = [
     "YtAiReport",
     "YtAnalyticsCache",
     "YtAnalyticsSync",
+    "YtMediaAsset",
     "YtChannelSnapshot",
     "YtVideo",
     "YtUploadJob",

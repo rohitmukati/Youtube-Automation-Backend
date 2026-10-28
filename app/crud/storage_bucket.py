@@ -1,3 +1,4 @@
+# app/crud/storage_bucket.py
 import uuid
 from typing import Optional
 
@@ -12,13 +13,13 @@ def _apply_filters(
     statement: Select,
     *,
     user_id: uuid.UUID,
-    file_type: Optional[StorageFileType],
     tags: list[str],
     search: Optional[str],
 ) -> Select:
-    statement = statement.where(StorageFile.user_id == user_id)
-    if file_type is not None:
-        statement = statement.where(StorageFile.file_type == file_type.value)
+    statement = statement.where(
+        StorageFile.user_id == user_id,
+        StorageFile.file_type == StorageFileType.IMAGE.value,
+    )
     for tag in tags:
         statement = statement.where(
             StorageFile.id.in_(
@@ -64,13 +65,12 @@ async def list_files(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
-    file_type: Optional[StorageFileType],
     tags: list[str],
     search: Optional[str],
     limit: int,
     offset: int,
 ) -> tuple[list[StorageFile], int]:
-    filters = {"user_id": user_id, "file_type": file_type, "tags": tags, "search": search}
+    filters = {"user_id": user_id, "tags": tags, "search": search}
     total = await session.scalar(
         _apply_filters(select(func.count()).select_from(StorageFile), **filters)
     )

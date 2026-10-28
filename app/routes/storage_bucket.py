@@ -1,3 +1,4 @@
+# app/routes/storage_bucket.py
 import uuid
 from typing import Annotated, Optional
 
@@ -5,7 +6,6 @@ from fastapi import APIRouter, File, Form, Query, UploadFile, status
 
 from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession
-from app.models.storage_bucket import StorageFileType
 from app.schemas.storage_bucket import (
     MessageResponse,
     StorageFileListResponse,
@@ -21,11 +21,12 @@ router = APIRouter(prefix="/storage", tags=["Storage Bucket"])
     "/files",
     response_model=StorageFileResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload a video or an image",
+    summary="Add an image to the library",
     description=(
-        "Send the file as multipart form data. The file type (video or image) is "
-        "detected from the file itself. Tags are optional and comma separated, "
-        "for example: promo, shorts, summer."
+        "Send an image (JPG, PNG, WEBP or GIF) as multipart form data. The content "
+        "of the file is checked, not only its name. Tags are optional and comma "
+        "separated, for example: thumbnail, summer. Videos are not stored in the "
+        "library: they are uploaded when you publish them."
     ),
 )
 async def upload_file(
@@ -44,16 +45,15 @@ async def upload_file(
 @router.get(
     "/files",
     response_model=StorageFileListResponse,
-    summary="List videos and images",
+    summary="List the images in the library",
     description=(
-        "Returns files with temporary signed URLs. Filter by type (video or image), "
-        "by tags (comma separated, a file must have all of them) and by file name."
+        "Returns images with temporary signed URLs. Filter by tags (comma "
+        "separated, an image must have all of them) and by file name."
     ),
 )
 async def list_files(
     current_user: CurrentUser,
     session: DbSession,
-    file_type: Annotated[Optional[StorageFileType], Query(alias="type")] = None,
     tags: Annotated[Optional[str], Query()] = None,
     search: Annotated[Optional[str], Query(max_length=100)] = None,
     limit: Annotated[
@@ -63,7 +63,6 @@ async def list_files(
 ) -> StorageFileListResponse:
     return await StorageBucketService(session).list_files(
         user_id=current_user.id,
-        file_type=file_type,
         tags_raw=tags,
         search=search,
         limit=limit,
@@ -92,7 +91,7 @@ async def update_tags(
 @router.delete(
     "/files/{file_id}",
     response_model=MessageResponse,
-    summary="Delete a video or an image",
+    summary="Delete an image",
 )
 async def delete_file(
     file_id: uuid.UUID,

@@ -8,9 +8,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.storage_bucket import StorageFile
+from app.models.yt_media_upload import YtMediaAsset
 from app.models.yt_channel_management import YtUploadJob, YtUploadQuotaDay, YtUploadTarget
 from app.models.yt_management import YouTubeAccount
-from app.utils.datetime_utils import utc_now
+from app.utils.datetime_utils import ensure_utc, utc_now
+from app.utils.yt_media_upload import MediaAssetStatus
 from app.utils.yt_channel_management import (
     ACTIVE_TARGET_STATUSES,
     WAITING_TARGET_STATUSES,
@@ -30,7 +32,8 @@ async def create_job(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
-    source_file: StorageFile,
+    asset: YtMediaAsset,
+    client_request_id: Optional[str],
     thumbnail_file: Optional[StorageFile],
     title: str,
     description: str,
@@ -46,10 +49,11 @@ async def create_job(
     job = YtUploadJob(
         id=uuid.uuid4(),
         user_id=user_id,
-        storage_file_id=source_file.id,
-        source_file_name=source_file.original_name,
-        source_content_type=source_file.content_type,
-        source_size_bytes=source_file.size_bytes,
+        media_asset_id=asset.id,
+        client_request_id=client_request_id,
+        source_file_name=asset.original_name,
+        source_content_type=asset.content_type,
+        source_size_bytes=asset.size_bytes,
         thumbnail_file_id=thumbnail_file.id if thumbnail_file else None,
         thumbnail_file_name=thumbnail_file.original_name if thumbnail_file else None,
         title=title,
@@ -61,7 +65,7 @@ async def create_job(
         made_for_kids=made_for_kids,
         default_language=default_language,
         notify_subscribers=notify_subscribers,
-        status=UploadJobStatus.QUEUED.value,
+        status=UploadJobStatus.UPLOADING_MEDIA.value,
         targets=[
             YtUploadTarget(
                 id=uuid.uuid4(),
@@ -72,6 +76,7 @@ async def create_job(
                 status=UploadTargetStatus.PENDING.value,
                 progress_percent=0,
                 attempts=0,
+                bytes_confirmed=0,
                 thumbnail_status=_initial_thumbnail_status(thumbnail_file is not None),
             )
             for account in accounts
@@ -80,6 +85,20 @@ async def create_job(
     session.add(job)
     await session.flush()
     return job
+
+
+async def get_job_by_request(
+    session: AsyncSession, user_id: uuid.UUID, client_request_id: str
+) -> Optional[YtUploadJob]:
+    result = await session.execute(
+        select(YtUploadJob)
+        .where(
+            YtUploadJob.user_id == user_id,
+            YtUploadJob.client_request_id == client_request_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
 
 
 async def get_job(
@@ -204,27 +223,39 @@ async def claim_next_target(
 ) -> Optional[YtUploadTarget]:
     statement = (
         select(YtUploadTarget)
+        .join(YtUploadJob, YtUploadJob.id == YtUploadTarget.job_id)
+        .join(YtMediaAsset, YtMediaAsset.id == YtUploadJob.media_asset_id)
         .where(
+            YtMediaAsset.status == MediaAssetStatus.READY.value,
             or_(
                 YtUploadTarget.status == UploadTargetStatus.PENDING.value,
                 and_(
                     YtUploadTarget.status == UploadTargetStatus.RETRYING.value,
                     YtUploadTarget.next_attempt_at <= now,
                 ),
-            )
+            ),
         )
         .order_by(YtUploadTarget.created_at, YtUploadTarget.id)
         .limit(1)
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=YtUploadTarget)
         .execution_options(populate_existing=True)
     )
     target = (await session.execute(statement)).scalar_one_or_none()
     if target is None:
         return None
+    size = await session.scalar(
+        select(YtUploadJob.source_size_bytes).where(YtUploadJob.id == target.job_id)
+    )
+    resumed = bool(target.resumable_uri) and bool(size)
     target.status = UploadTargetStatus.UPLOADING.value
     target.attempts = target.attempts + 1
-    target.progress_percent = 0
+    target.progress_percent = (
+        min(int(target.bytes_confirmed * 100 / size), 99) if resumed else 0
+    )
+    if not resumed:
+        target.bytes_confirmed = 0
     target.locked_at = now
+    target.lease_token = uuid.uuid4().hex
     target.next_attempt_at = None
     target.finished_at = None
     if target.started_at is None:
@@ -234,15 +265,46 @@ async def claim_next_target(
 
 
 async def touch_target(
-    session: AsyncSession, target_id: uuid.UUID, *, progress: int, now: datetime
+    session: AsyncSession,
+    target_id: uuid.UUID,
+    lease_token: str,
+    *,
+    now: datetime,
+    progress: Optional[int] = None,
+    bytes_confirmed: Optional[int] = None,
+) -> bool:
+    values: dict = {"locked_at": now}
+    if progress is not None:
+        values["progress_percent"] = progress
+    if bytes_confirmed is not None:
+        values["bytes_confirmed"] = bytes_confirmed
+    result = await session.execute(
+        update(YtUploadTarget)
+        .where(
+            YtUploadTarget.id == target_id,
+            YtUploadTarget.status == UploadTargetStatus.UPLOADING.value,
+            YtUploadTarget.lease_token == lease_token,
+        )
+        .values(**values)
+    )
+    return (result.rowcount or 0) > 0
+
+
+async def save_session(
+    session: AsyncSession,
+    target_id: uuid.UUID,
+    lease_token: str,
+    *,
+    encrypted_uri: Optional[str],
 ) -> bool:
     result = await session.execute(
         update(YtUploadTarget)
         .where(
             YtUploadTarget.id == target_id,
             YtUploadTarget.status == UploadTargetStatus.UPLOADING.value,
+            YtUploadTarget.lease_token == lease_token,
         )
-        .values(progress_percent=progress, locked_at=now)
+        .values(resumable_uri=encrypted_uri, bytes_confirmed=0, progress_percent=0)
     )
     return (result.rowcount or 0) > 0
 
@@ -263,6 +325,7 @@ async def release_stale_targets(
     for target in result.scalars().all():
         job_ids.add(target.job_id)
         target.locked_at = None
+        target.lease_token = None
         if target.attempts >= max_attempts:
             target.status = UploadTargetStatus.FAILED.value
             target.error_code = "interrupted"
@@ -276,22 +339,35 @@ async def release_stale_targets(
 
 async def mark_target_done(
     session: AsyncSession,
-    target: YtUploadTarget,
+    target_id: uuid.UUID,
+    lease_token: str,
     *,
     video_id: str,
     video_url: str,
     now: datetime,
-) -> None:
-    target.status = UploadTargetStatus.DONE.value
-    target.progress_percent = 100
-    target.youtube_video_id = video_id
-    target.youtube_url = video_url
-    target.error_code = None
-    target.error_message = None
-    target.locked_at = None
-    target.next_attempt_at = None
-    target.finished_at = now
-    await session.flush()
+) -> bool:
+    result = await session.execute(
+        update(YtUploadTarget)
+        .where(
+            YtUploadTarget.id == target_id,
+            YtUploadTarget.lease_token == lease_token,
+            YtUploadTarget.status == UploadTargetStatus.UPLOADING.value,
+        )
+        .values(
+            status=UploadTargetStatus.DONE.value,
+            progress_percent=100,
+            youtube_video_id=video_id,
+            youtube_url=video_url,
+            error_code=None,
+            error_message=None,
+            locked_at=None,
+            lease_token=None,
+            next_attempt_at=None,
+            resumable_uri=None,
+            finished_at=now,
+        )
+    )
+    return (result.rowcount or 0) > 0
 
 
 async def mark_target_retrying(
@@ -307,6 +383,7 @@ async def mark_target_retrying(
     target.error_message = shorten(message)
     target.next_attempt_at = next_attempt_at
     target.locked_at = None
+    target.lease_token = None
     await session.flush()
 
 
@@ -323,6 +400,7 @@ async def mark_target_failed(
     target.error_message = shorten(message)
     target.next_attempt_at = None
     target.locked_at = None
+    target.lease_token = None
     target.finished_at = now
     await session.flush()
 
@@ -331,7 +409,7 @@ async def requeue_target(session: AsyncSession, target: YtUploadTarget) -> None:
     target.status = UploadTargetStatus.PENDING.value
     target.attempts = max(target.attempts - 1, 0)
     target.locked_at = None
-    target.progress_percent = 0
+    target.lease_token = None
     await session.flush()
 
 
@@ -349,34 +427,87 @@ async def set_thumbnail_result(
     )
 
 
-async def fail_waiting_targets(
-    session: AsyncSession, *, user_id: uuid.UUID, code: str, message: str, now: datetime
+async def defer_waiting_targets(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    code: str,
+    message: str,
+    fail_message: Optional[str] = None,
+    resume_at: datetime,
+    now: datetime,
 ) -> set[uuid.UUID]:
     rows = (
         await session.execute(
-            select(YtUploadTarget.id, YtUploadTarget.job_id)
+            select(YtUploadTarget, YtMediaAsset.expires_at)
             .join(YtUploadJob, YtUploadJob.id == YtUploadTarget.job_id)
+            .join(YtMediaAsset, YtMediaAsset.id == YtUploadJob.media_asset_id)
             .where(
                 YtUploadJob.user_id == user_id,
                 YtUploadTarget.status.in_(WAITING_TARGET_STATUSES),
             )
+            .execution_options(populate_existing=True)
         )
     ).all()
-    if not rows:
-        return set()
-    await session.execute(
+    job_ids: set[uuid.UUID] = set()
+    for target, expires_at in rows:
+        job_ids.add(target.job_id)
+        deadline = ensure_utc(expires_at) if expires_at is not None else None
+        if deadline is not None and resume_at >= deadline:
+            target.status = UploadTargetStatus.FAILED.value
+            target.error_code = code
+            target.error_message = shorten(fail_message or message)
+            target.next_attempt_at = None
+            target.finished_at = now
+        else:
+            target.status = UploadTargetStatus.RETRYING.value
+            target.error_code = code
+            target.error_message = shorten(message)
+            target.next_attempt_at = resume_at
+        target.locked_at = None
+        target.lease_token = None
+    await session.flush()
+    return job_ids
+
+
+async def fail_job_targets(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    *,
+    code: str,
+    message: str,
+    now: datetime,
+) -> int:
+    result = await session.execute(
         update(YtUploadTarget)
-        .where(YtUploadTarget.id.in_([row[0] for row in rows]))
+        .where(
+            YtUploadTarget.job_id == job_id,
+            YtUploadTarget.status.in_(ACTIVE_TARGET_STATUSES),
+        )
         .values(
             status=UploadTargetStatus.FAILED.value,
             error_code=code,
             error_message=shorten(message),
             next_attempt_at=None,
             locked_at=None,
+            lease_token=None,
+            resumable_uri=None,
             finished_at=now,
         )
     )
-    return {row[1] for row in rows}
+    return result.rowcount or 0
+
+
+async def count_uploading_targets(session: AsyncSession, job_id: uuid.UUID) -> int:
+    total = await session.scalar(
+        select(func.count())
+        .select_from(YtUploadTarget)
+        .where(
+            YtUploadTarget.job_id == job_id,
+            YtUploadTarget.status == UploadTargetStatus.UPLOADING.value,
+        )
+    )
+    return int(total or 0)
 
 
 async def cancel_active_targets(
@@ -392,6 +523,8 @@ async def cancel_active_targets(
             status=UploadTargetStatus.CANCELLED.value,
             next_attempt_at=None,
             locked_at=None,
+            lease_token=None,
+            resumable_uri=None,
             finished_at=now,
         )
     )
@@ -409,10 +542,9 @@ async def reset_targets(
         .values(
             status=UploadTargetStatus.PENDING.value,
             attempts=0,
-            progress_percent=0,
             next_attempt_at=None,
             locked_at=None,
-            started_at=None,
+            lease_token=None,
             finished_at=None,
             error_code=None,
             error_message=None,
@@ -423,6 +555,9 @@ async def reset_targets(
 
 
 async def refresh_job_status(session: AsyncSession, job_id: uuid.UUID) -> UploadJobStatus:
+    await session.execute(
+        select(YtUploadJob.id).where(YtUploadJob.id == job_id).with_for_update()
+    )
     statuses = (
         (
             await session.execute(
@@ -433,12 +568,34 @@ async def refresh_job_status(session: AsyncSession, job_id: uuid.UUID) -> Upload
         .all()
     )
     new_status = compute_job_status(statuses)
+    if new_status is UploadJobStatus.QUEUED:
+        media_status = await session.scalar(
+            select(YtMediaAsset.status)
+            .join(YtUploadJob, YtUploadJob.media_asset_id == YtMediaAsset.id)
+            .where(YtUploadJob.id == job_id)
+        )
+        if media_status == MediaAssetStatus.UPLOADING.value:
+            new_status = UploadJobStatus.UPLOADING_MEDIA
     await session.execute(
         update(YtUploadJob)
         .where(YtUploadJob.id == job_id)
         .values(status=new_status.value, updated_at=utc_now())
     )
     return new_status
+
+
+async def release_quota(
+    session: AsyncSession, *, user_id: uuid.UUID, day: date
+) -> None:
+    await session.execute(
+        update(YtUploadQuotaDay)
+        .where(
+            YtUploadQuotaDay.user_id == user_id,
+            YtUploadQuotaDay.day == day,
+            YtUploadQuotaDay.calls > 0,
+        )
+        .values(calls=YtUploadQuotaDay.calls - 1, updated_at=utc_now())
+    )
 
 
 async def count_waiting_targets(session: AsyncSession, user_id: uuid.UUID) -> int:
@@ -510,3 +667,25 @@ async def mark_account_used(
     await session.execute(
         update(YouTubeAccount).where(YouTubeAccount.id == account_id).values(last_used_at=now)
     )
+
+
+async def list_stuck_job_ids(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
+    active = (
+        select(YtUploadTarget.id)
+        .where(
+            YtUploadTarget.job_id == YtUploadJob.id,
+            YtUploadTarget.status.in_(ACTIVE_TARGET_STATUSES),
+        )
+        .exists()
+    )
+    result = await session.execute(
+        select(YtUploadJob.id)
+        .where(
+            YtUploadJob.status.in_(
+                (UploadJobStatus.QUEUED.value, UploadJobStatus.RUNNING.value)
+            ),
+            ~active,
+        )
+        .limit(limit)
+    )
+    return list(result.scalars().all())

@@ -6,7 +6,9 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.config import settings
+from app.schemas.yt_media_upload import DeclaredFile, MediaUploadInfo
 from app.utils.datetime_utils import utc_now
+from app.utils.yt_media_upload import MediaAssetStatus
 from app.utils.yt_channel_management import (
     PrivacyStatus,
     ThumbnailStatus,
@@ -19,7 +21,10 @@ from app.utils.yt_channel_management import (
 
 
 class CreateUploadRequest(BaseModel):
-    storage_file_id: uuid.UUID
+    file: DeclaredFile
+    client_request_id: Optional[str] = Field(
+        default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
+    )
     account_ids: list[uuid.UUID] = Field(
         min_length=1, max_length=settings.yt_upload_max_accounts
     )
@@ -88,6 +93,7 @@ class UploadTargetResponse(BaseModel):
     status: UploadTargetStatus
     progress_percent: int
     attempts: int
+    bytes_confirmed: int = 0
     max_attempts: int = settings.yt_upload_max_attempts
     next_attempt_at: Optional[datetime] = None
     youtube_video_id: Optional[str] = None
@@ -105,7 +111,8 @@ class UploadJobSummary(BaseModel):
     status: UploadJobStatus
     title: str
     privacy_status: PrivacyStatus
-    storage_file_id: Optional[uuid.UUID] = None
+    media_status: Optional[MediaAssetStatus] = None
+    media_expires_at: Optional[datetime] = None
     source_file_name: str
     source_size_bytes: int
     total_channels: int
@@ -129,6 +136,12 @@ class UploadJobDetail(UploadJobSummary):
     thumbnail_file_id: Optional[uuid.UUID] = None
     thumbnail_file_name: Optional[str] = None
     targets: list[UploadTargetResponse]
+
+
+class StartUploadResponse(BaseModel):
+    job: "UploadJobDetail"
+    upload: Optional[MediaUploadInfo] = None
+    reused: bool = False
 
 
 class UploadChannelBrief(BaseModel):

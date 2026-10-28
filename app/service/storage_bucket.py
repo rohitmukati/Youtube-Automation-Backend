@@ -1,3 +1,4 @@
+# app/service/storage_bucket.py
 import logging
 import os
 import re
@@ -15,25 +16,12 @@ from app.models.storage_bucket import StorageFile, StorageFileType
 from app.schemas.storage_bucket import StorageFileListResponse, StorageFileResponse
 from app.utils import bucket
 from app.utils.tags import normalize_tags, split_tags
+from app.utils.yt_media_upload import looks_like_image
 
 logger = logging.getLogger(__name__)
 
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9]{1,10}$")
 _BYTES_PER_MB = 1024 * 1024
-
-
-def _classify(content_type: str) -> Optional[StorageFileType]:
-    if content_type in settings.storage_video_content_types:
-        return StorageFileType.VIDEO
-    if content_type in settings.storage_image_content_types:
-        return StorageFileType.IMAGE
-    return None
-
-
-def _max_bytes(file_type: StorageFileType) -> int:
-    if file_type is StorageFileType.VIDEO:
-        return settings.storage_video_max_bytes
-    return settings.storage_image_max_bytes
 
 
 def _measure(upload: UploadFile) -> int:
@@ -102,20 +90,24 @@ class StorageBucketService:
         self, user_id: uuid.UUID, upload: UploadFile, tags_raw: Optional[str]
     ) -> StorageFileResponse:
         content_type = (upload.content_type or "").split(";")[0].strip().lower()
-        file_type = _classify(content_type)
-        if file_type is None:
+        if content_type not in settings.storage_image_content_types:
             raise ValidationError(
-                "Only video files (MP4, MOV, AVI, MKV, WEBM, MPEG) and "
-                "image files (JPG, PNG, WEBP, GIF) can be uploaded."
+                "Only image files (JPG, PNG, WEBP, GIF) can be added to the library. "
+                "Videos are uploaded when you publish them."
             )
+        file_type = StorageFileType.IMAGE
 
         size = _measure(upload)
         if size == 0:
             raise ValidationError("The uploaded file is empty.")
-        limit = _max_bytes(file_type)
+        limit = settings.storage_image_max_bytes
         if size > limit:
+            raise ValidationError(f"Images can be at most {limit // _BYTES_PER_MB} MB.")
+        header = upload.file.read(16)
+        upload.file.seek(0)
+        if not looks_like_image(header, content_type):
             raise ValidationError(
-                f"{file_type.value.capitalize()} files can be at most {limit // _BYTES_PER_MB} MB."
+                "The file content does not match an image of the selected type."
             )
 
         tags = _parse_tags(tags_raw)
@@ -151,7 +143,6 @@ class StorageBucketService:
         self,
         user_id: uuid.UUID,
         *,
-        file_type: Optional[StorageFileType],
         tags_raw: Optional[str],
         search: Optional[str],
         limit: int,
@@ -160,7 +151,6 @@ class StorageBucketService:
         records, total = await storage_crud.list_files(
             self._session,
             user_id=user_id,
-            file_type=file_type,
             tags=_parse_tags(tags_raw),
             search=(search or "").strip() or None,
             limit=limit,

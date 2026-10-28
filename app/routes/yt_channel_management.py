@@ -9,10 +9,12 @@ from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
+    StartUploadResponse,
     UploadJobDetail,
     UploadJobListResponse,
     UploadQuotaResponse,
 )
+from app.schemas.yt_media_upload import MediaStateResponse
 from app.service.yt_channel_management import YtChannelManagementService
 from app.utils.yt_channel_management import UploadJobStatus
 
@@ -21,21 +23,23 @@ router = APIRouter(prefix="/yt-channels", tags=["YouTube Channel Management"])
 
 @router.post(
     "/uploads",
-    response_model=UploadJobDetail,
+    response_model=StartUploadResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload one video to many YouTube channels",
+    summary="Start publishing one video to many YouTube channels",
     description=(
-        "Pick a video from your library (upload it to the library first if it is on your "
-        "computer), then choose the connected channels. The same title, description, tags "
-        "and settings are used for every channel. The upload runs in the background; "
-        "follow it with the job detail endpoint."
+        "Send the video's name, size and type together with the title, description, "
+        "tags and the channels. Nothing is uploaded until you call this. The response "
+        "contains presigned URLs: the browser sends the video straight to storage in "
+        "parts, then calls the complete endpoint. Publishing to every channel starts "
+        "automatically once the file is complete. Send the same client_request_id on a "
+        "repeated request to get the same upload back instead of creating a second one."
     ),
 )
 async def create_upload(
     payload: CreateUploadRequest,
     current_user: CurrentUser,
     session: DbSession,
-) -> UploadJobDetail:
+) -> StartUploadResponse:
     return await YtChannelManagementService(session).create_upload(current_user.id, payload)
 
 
@@ -96,6 +100,40 @@ async def get_upload(
     session: DbSession,
 ) -> UploadJobDetail:
     return await YtChannelManagementService(session).get_upload(current_user.id, job_id)
+
+
+@router.get(
+    "/uploads/{job_id}/media",
+    response_model=MediaStateResponse,
+    summary="Upload state of the video file, with fresh URLs for the missing parts",
+    description=(
+        "Use this to resume a browser upload after a refresh or a lost connection. "
+        "It lists the parts already stored and returns new presigned URLs for the rest."
+    ),
+)
+async def get_media_state(
+    job_id: uuid.UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> MediaStateResponse:
+    return await YtChannelManagementService(session).get_media_state(current_user.id, job_id)
+
+
+@router.post(
+    "/uploads/{job_id}/media/complete",
+    response_model=UploadJobDetail,
+    summary="Tell the server that every part has been uploaded",
+    description=(
+        "The server checks every part itself, joins them into the final file and "
+        "starts publishing to the selected channels. Calling it again is safe."
+    ),
+)
+async def complete_media(
+    job_id: uuid.UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> UploadJobDetail:
+    return await YtChannelManagementService(session).complete_media(current_user.id, job_id)
 
 
 @router.post(
