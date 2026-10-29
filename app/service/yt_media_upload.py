@@ -19,6 +19,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.crud import yt_channel_management as job_crud
+from app.crud.yt_channel_management import count_active_targets as _count_active_targets
 from app.crud import yt_media_upload as crud
 from app.models.yt_media_upload import YtMediaAsset
 from app.schemas.yt_media_upload import DeclaredFile, MediaUploadInfo, PartUrl
@@ -258,7 +259,10 @@ async def run_reaper_once(
     async with session_factory() as session:
         for asset in await crud.list_due_for_expiry(session, now=now, limit=limit):
             job = await crud.get_job_for_asset(session, asset.id)
-            if job is not None and await job_crud.count_uploading_targets(session, job.id):
+            # Skip if any channel still needs this file: pending, uploading, or retrying.
+            # Using only count_uploading_targets was wrong — pending channels also need the
+            # file but haven't been claimed by a worker yet.
+            if job is not None and await _count_active_targets(session, job.id):
                 continue
             try:
                 await bucket.delete_object(asset.object_key)

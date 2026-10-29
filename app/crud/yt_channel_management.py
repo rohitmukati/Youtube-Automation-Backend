@@ -510,6 +510,19 @@ async def count_uploading_targets(session: AsyncSession, job_id: uuid.UUID) -> i
     return int(total or 0)
 
 
+async def count_active_targets(session: AsyncSession, job_id: uuid.UUID) -> int:
+    """Count targets that still need the source file: pending, uploading, or retrying."""
+    total = await session.scalar(
+        select(func.count())
+        .select_from(YtUploadTarget)
+        .where(
+            YtUploadTarget.job_id == job_id,
+            YtUploadTarget.status.in_(ACTIVE_TARGET_STATUSES),
+        )
+    )
+    return int(total or 0)
+
+
 async def cancel_active_targets(
     session: AsyncSession, job_id: uuid.UUID, *, now: datetime
 ) -> int:

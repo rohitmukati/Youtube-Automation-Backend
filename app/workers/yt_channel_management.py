@@ -241,17 +241,16 @@ class YtUploadWorker:
         if plan is None:
             raise UploadCancelled()
         credentials = await self._get_credentials(plan)
-        source_url = await self._sign(plan.source_key)
 
         cancel = threading.Event()
-        reader = youtube_api.RangeReader(source_url, plan.size_bytes)
         heartbeat = asyncio.create_task(self._heartbeat(plan, cancel))
         try:
-            video_id = await self._transfer(plan, credentials, reader, cancel)
+            # _transfer owns the RangeReader lifecycle and refreshes the signed URL
+            # before each new session so an expired URL never causes a silent 404.
+            video_id = await self._transfer(plan, credentials, cancel)
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
-            reader.close()
 
         await self._record_success(plan, video_id)
         await self._apply_thumbnail(plan, credentials, video_id)
@@ -261,7 +260,6 @@ class YtUploadWorker:
         self,
         plan: _Plan,
         credentials,
-        reader: "youtube_api.RangeReader",
         cancel: threading.Event,
     ) -> str:
         session_uri = self._read_session(plan)
@@ -269,10 +267,15 @@ class YtUploadWorker:
         check_stop = self._stop_checker(cancel)
         on_progress = self._progress_callback(plan, loop, cancel)
 
-        for _ in range(2):
-            if session_uri is None:
-                session_uri = await self._start_session(plan, credentials, reader)
+        # Two attempts: one for a normal run, one after a YouTube session expiry.
+        # A fresh signed URL is generated before each attempt so that an expired
+        # presigned URL never causes a 404 when the upload is resumed or retried.
+        for attempt in range(2):
+            source_url = await self._sign(plan.source_key)
+            reader = youtube_api.RangeReader(source_url, plan.size_bytes)
             try:
+                if session_uri is None:
+                    session_uri = await self._start_session(plan, credentials, reader)
                 return await self._in_thread(
                     youtube_api.upload_resumable,
                     credentials,
@@ -283,9 +286,16 @@ class YtUploadWorker:
                     check_stop=check_stop,
                 )
             except youtube_api.SessionExpiredError:
-                logger.info("Upload session of target %s expired, starting a new one", plan.target_id)
+                logger.info(
+                    "Upload session of target %s expired on attempt %d, starting a new one",
+                    plan.target_id,
+                    attempt + 1,
+                )
                 await self._save_session(plan, None)
                 session_uri = None
+            finally:
+                reader.close()
+
         raise UploadFailureError(
             UploadFailure(
                 code="youtube_unavailable",
@@ -351,6 +361,14 @@ class YtUploadWorker:
                 else None
             )
             if asset is None or asset.status != MediaAssetStatus.READY.value:
+                actual_status = asset.status if asset is not None else "not found"
+                logger.warning(
+                    "Target %s: media asset %s is not ready (status=%s); "
+                    "was READY when claimed but changed before _load_plan ran",
+                    target_id,
+                    job.media_asset_id,
+                    actual_status,
+                )
                 raise UploadFailureError(
                     UploadFailure(
                         code="source_missing",
