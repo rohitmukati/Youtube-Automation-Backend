@@ -12,7 +12,7 @@ from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload
 
 from app.config import settings
 from app.utils.yt_channel_management import UploadFailure, UploadFailureError
@@ -421,6 +421,39 @@ def upload_resumable(
 
 def _build_youtube(credentials: Credentials):
     return build("youtube", "v3", credentials=credentials, cache_discovery=False)
+
+
+def upload_local_file_sync(
+    credentials: Credentials,
+    *,
+    file_path: str,
+    content_type: str,
+    body: dict,
+    notify_subscribers: bool,
+) -> str:
+    """Upload one local temp file directly to YouTube."""
+    youtube = _build_youtube(credentials)
+    media = MediaFileUpload(
+        file_path,
+        mimetype=content_type,
+        resumable=True,
+        chunksize=-1,
+    )
+    response = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media,
+        notifySubscribers="true" if notify_subscribers else "false",
+    ).execute(num_retries=0)
+    video_id = response.get("id")
+    if not video_id:
+        raise UploadFailureError(
+            UploadFailure(
+                code="no_video_id",
+                message="YouTube finished the upload but did not return a video ID.",
+            )
+        )
+    return str(video_id)
 
 
 def fetch_bytes_sync(url: str, *, max_bytes: int, timeout: int) -> bytes:

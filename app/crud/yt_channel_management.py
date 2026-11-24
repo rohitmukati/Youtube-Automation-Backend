@@ -87,6 +87,67 @@ async def create_job(
     return job
 
 
+async def create_direct_job(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    client_request_id: Optional[str],
+    thumbnail_file: Optional[StorageFile],
+    title: str,
+    description: str,
+    tags: list[str],
+    category_id: str,
+    privacy_status: str,
+    publish_at: Optional[datetime],
+    made_for_kids: bool,
+    default_language: Optional[str],
+    notify_subscribers: bool,
+    source_file_name: str,
+    source_content_type: str,
+    source_size_bytes: int,
+    accounts: Sequence[YouTubeAccount],
+) -> YtUploadJob:
+    job = YtUploadJob(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        media_asset_id=None,
+        client_request_id=client_request_id,
+        source_file_name=source_file_name,
+        source_content_type=source_content_type,
+        source_size_bytes=source_size_bytes,
+        thumbnail_file_id=thumbnail_file.id if thumbnail_file else None,
+        thumbnail_file_name=thumbnail_file.original_name if thumbnail_file else None,
+        title=title,
+        description=description,
+        tags=tags,
+        category_id=category_id,
+        privacy_status=privacy_status,
+        publish_at=publish_at,
+        made_for_kids=made_for_kids,
+        default_language=default_language,
+        notify_subscribers=notify_subscribers,
+        status=UploadJobStatus.RUNNING.value,
+        targets=[
+            YtUploadTarget(
+                id=uuid.uuid4(),
+                account_id=account.id,
+                channel_id=account.channel_id,
+                channel_title=account.channel_title,
+                account_nickname=account.nickname,
+                status=UploadTargetStatus.PENDING.value,
+                progress_percent=0,
+                attempts=0,
+                bytes_confirmed=0,
+                thumbnail_status=_initial_thumbnail_status(thumbnail_file is not None),
+            )
+            for account in accounts
+        ],
+    )
+    session.add(job)
+    await session.flush()
+    return job
+
+
 async def get_job_by_request(
     session: AsyncSession, user_id: uuid.UUID, client_request_id: str
 ) -> Optional[YtUploadJob]:

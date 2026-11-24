@@ -174,3 +174,61 @@ class UploadQuotaResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class DirectUploadRequest(BaseModel):
+    client_request_id: Optional[str] = Field(
+        default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
+    )
+    account_ids: list[uuid.UUID] = Field(
+        min_length=1, max_length=settings.yt_upload_max_accounts
+    )
+    title: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    category_id: str = Field(default=settings.yt_default_category_id, pattern=r"^\d{1,3}$")
+    privacy_status: PrivacyStatus = PrivacyStatus(settings.yt_default_privacy)
+    publish_at: Optional[datetime] = None
+    made_for_kids: bool = False
+    default_language: Optional[str] = Field(
+        default=None, max_length=20, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+    )
+    notify_subscribers: bool = True
+    thumbnail_file_id: Optional[uuid.UUID] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        return clean_title(value)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return clean_description(value)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, value: list[str]) -> list[str]:
+        return clean_tags(value)
+
+    @field_validator("account_ids")
+    @classmethod
+    def dedupe_accounts(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        return list(dict.fromkeys(value))
+
+    @field_validator("publish_at")
+    @classmethod
+    def validate_publish_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return value
+        if value.tzinfo is None:
+            raise ValueError("The publish time must include a timezone.")
+        if value <= utc_now():
+            raise ValueError("The publish time must be in the future.")
+        return value
+
+    @model_validator(mode="after")
+    def scheduled_videos_stay_private(self) -> "DirectUploadRequest":
+        if self.publish_at is not None:
+            self.privacy_status = PrivacyStatus.PRIVATE
+        return self

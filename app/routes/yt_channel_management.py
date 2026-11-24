@@ -3,12 +3,13 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, File, Form, UploadFile
 
 from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
+    DirectUploadRequest,
     StartUploadResponse,
     UploadJobDetail,
     UploadJobListResponse,
@@ -19,6 +20,24 @@ from app.service.yt_channel_management import YtChannelManagementService
 from app.utils.yt_channel_management import UploadJobStatus
 
 router = APIRouter(prefix="/yt-channels", tags=["YouTube Channel Management"])
+
+
+@router.post(
+    "/uploads/direct",
+    response_model=UploadJobDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a video directly and publish sequentially",
+)
+async def create_direct_upload(
+    current_user: CurrentUser,
+    session: DbSession,
+    file: Annotated[UploadFile, File()],
+    metadata: Annotated[str, Form()],
+) -> UploadJobDetail:
+    payload = DirectUploadRequest.model_validate_json(metadata)
+    return await YtChannelManagementService(session).direct_upload(
+        current_user.id, payload, file
+    )
 
 
 @router.post(
