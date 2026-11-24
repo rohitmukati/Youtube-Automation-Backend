@@ -45,6 +45,7 @@ async def create_job(
     default_language: Optional[str],
     notify_subscribers: bool,
     accounts: Sequence[YouTubeAccount],
+    channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
 ) -> YtUploadJob:
     job = YtUploadJob(
         id=uuid.uuid4(),
@@ -106,6 +107,7 @@ async def create_direct_job(
     source_content_type: str,
     source_size_bytes: int,
     accounts: Sequence[YouTubeAccount],
+    channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
 ) -> YtUploadJob:
     job = YtUploadJob(
         id=uuid.uuid4(),
@@ -134,6 +136,9 @@ async def create_direct_job(
                 channel_id=account.channel_id,
                 channel_title=account.channel_title,
                 account_nickname=account.nickname,
+                title=(channel_metadata or {}).get(account.id, {}).get("title"),
+                description=(channel_metadata or {}).get(account.id, {}).get("description"),
+                tags=(channel_metadata or {}).get(account.id, {}).get("tags") or None,
                 status=UploadTargetStatus.PENDING.value,
                 progress_percent=0,
                 attempts=0,

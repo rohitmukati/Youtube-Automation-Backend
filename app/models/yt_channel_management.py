@@ -111,6 +111,10 @@ class YtUploadTarget(TimestampMixin, Base):
     channel_title: Mapped[str] = mapped_column(String(255), nullable=False)
     account_nickname: Mapped[str] = mapped_column(String(100), nullable=False)
 
+    title: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=None)
+
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=UploadTargetStatus.PENDING.value
     )

@@ -14,12 +14,29 @@ from app.schemas.yt_channel_management import (
     UploadJobDetail,
     UploadJobListResponse,
     UploadQuotaResponse,
+    GenerateChannelMetadataRequest,
+    GenerateChannelMetadataResponse,
 )
 from app.schemas.yt_media_upload import MediaStateResponse
 from app.service.yt_channel_management import YtChannelManagementService
 from app.utils.yt_channel_management import UploadJobStatus
 
 router = APIRouter(prefix="/yt-channels", tags=["YouTube Channel Management"])
+
+
+@router.post(
+    "/uploads/metadata/generate",
+    response_model=GenerateChannelMetadataResponse,
+    summary="Generate engaging metadata for selected YouTube channels",
+)
+async def generate_channel_metadata(
+    payload: GenerateChannelMetadataRequest,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> GenerateChannelMetadataResponse:
+    return await YtChannelManagementService(session).generate_channel_metadata(
+        current_user.id, payload
+    )
 
 
 @router.post(

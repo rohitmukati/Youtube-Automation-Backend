@@ -18,17 +18,23 @@ from app.core.exceptions import (
     MediaExpiredError,
     NotFoundError,
     ValidationError,
+    AiNotConfiguredError,
+    AiGenerationError,
 )
 from app.crud import storage_bucket as storage_crud
 from app.crud import yt_channel_management as crud
 from app.crud import yt_media_upload as media_crud
 from app.integrations import youtube_api
+from app.integrations.gemini_api import GeminiError, generate_json_sync
 from app.models.storage_bucket import StorageFile, StorageFileType
 from app.models.yt_channel_management import YtUploadJob, YtUploadTarget
 from app.models.yt_media_upload import YtMediaAsset
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
     DirectUploadRequest,
+    GenerateChannelMetadataRequest,
+    GenerateChannelMetadataResponse,
+    GeneratedChannelMetadata,
     StartUploadResponse,
     UploadChannelBrief,
     UploadJobDetail,
@@ -43,6 +49,7 @@ from app.service.yt_management import YouTubeManagementService
 from app.service.yt_media_upload import YtMediaUploadService
 from app.utils import bucket
 from app.utils.datetime_utils import ensure_utc, utc_now
+from app.utils.yt_ai_insights import parse_model_json
 from app.utils.yt_channel_management import (
     ACTIVE_TARGET_STATUSES,
     UploadJobStatus,
@@ -62,6 +69,17 @@ from app.utils.yt_media_upload import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _channel_metadata_map(payload) -> dict[uuid.UUID, dict]:
+    return {
+        item.account_id: {
+            "title": item.title,
+            "description": item.description,
+            "tags": list(item.tags or []),
+        }
+        for item in payload.channel_metadata
+    }
 
 
 def _summary_data(job: YtUploadJob, asset: Optional[YtMediaAsset]) -> dict:
@@ -176,6 +194,7 @@ class YtChannelManagementService:
                 default_language=payload.default_language,
                 notify_subscribers=payload.notify_subscribers,
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
+                channel_metadata=_channel_metadata_map(payload),
             )
             await self._session.commit()
         except IntegrityError:
@@ -203,6 +222,85 @@ class YtChannelManagementService:
         info = await self._media.upload_info(asset, known_parts=[])
         return StartUploadResponse(
             job=_to_detail(job, await self._load_emails([job]), asset), upload=info
+        )
+
+    async def generate_channel_metadata(
+        self,
+        user_id: uuid.UUID,
+        payload: GenerateChannelMetadataRequest,
+    ) -> GenerateChannelMetadataResponse:
+        accounts = await self._get_uploadable_accounts(user_id, payload.account_ids)
+        if not settings.gemini_configured:
+            raise AiNotConfiguredError()
+
+        channel_context = [
+            {
+                "account_id": str(account_id),
+                "nickname": accounts[account_id].nickname,
+                "channel_title": accounts[account_id].channel_title,
+            }
+            for account_id in payload.account_ids
+        ]
+        system_prompt = (
+            "You are a world-class YouTube metadata strategist and viral copywriter. "
+            "Create unique, channel-specific metadata that feels native to that channel, "
+            "uses natural curiosity and a strong hook, and avoids clickbait deception. "
+            "Titles must be specific, readable, high-energy and 100 characters or fewer. "
+            "Descriptions must add context, excitement and viewer value, and be 5000 bytes or fewer. "
+            "Tags must be highly relevant, discoverable and not repetitive spam. "
+            "Never mention that the text was AI-generated. Do not use < or >. "
+            "Return only valid JSON."
+        )
+        user_prompt = (
+            "MASTER METADATA:\n"
+            f"Title: {payload.title}\n"
+            f"Description: {payload.description or '(empty)'}\n"
+            f"Tags: {', '.join(payload.tags)}\n\n"
+            "SELECTED CHANNELS:\n"
+            + "\n".join(
+                f"- account_id={item['account_id']}; nickname={item['nickname']}; "
+                f"channel_title={item['channel_title']}"
+                for item in channel_context
+            )
+            + "\n\nRequired JSON shape:\n"
+            '{"channels":[{"account_id":"UUID","title":"...","description":"...","tags":["..."]}]}'
+            "\nRules: Create one entry per account_id. Preserve the meaning of the master metadata. "
+            "Make each title distinct, opening-hook strong, and optimized for curiosity plus clarity. "
+            "Descriptions should follow this structure: 1-2 high-impact lines, short context, "
+            "3-6 useful takeaway bullets or short sections, a clear call to subscribe, and one natural CTA. "
+            "Use only 8-15 relevant tags, avoid channel-name repetition unless useful for discovery."
+        )
+
+        try:
+            text = await asyncio.to_thread(
+                generate_json_sync,
+                model=settings.gemini_model_fast,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            data = parse_model_json(text)
+            response = GenerateChannelMetadataResponse.model_validate(data)
+        except GeminiError as exc:
+            if exc.kind == "not_configured":
+                raise AiNotConfiguredError() from exc
+            raise AiGenerationError() from exc
+        except Exception as exc:
+            raise AiGenerationError() from exc
+
+        by_id = {item.account_id: item for item in response.channels}
+        return GenerateChannelMetadataResponse(
+            channels=[
+                by_id.get(
+                    account_id,
+                    GeneratedChannelMetadata(
+                        account_id=account_id,
+                        title=payload.title,
+                        description=payload.description,
+                        tags=payload.tags,
+                    ),
+                )
+                for account_id in payload.account_ids
+            ]
         )
 
     async def direct_upload(
@@ -263,28 +361,22 @@ class YtChannelManagementService:
                 source_content_type=content_type,
                 source_size_bytes=size,
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
+                channel_metadata=_channel_metadata_map(payload),
             )
             await self._session.commit()
 
-            body = build_video_body(
-                title=job.title,
-                description=job.description,
-                tags=list(job.tags or []),
-                category_id=job.category_id,
-                privacy_status=job.privacy_status,
-                publish_at=job.publish_at,
-                made_for_kids=job.made_for_kids,
-                default_language=job.default_language,
-            )
-
             for target in job.targets:
-                target.status = UploadTargetStatus.UPLOADING.value
-                target.attempts = 1
-                target.started_at = utc_now()
-                await self._session.commit()
+                body = build_video_body(
+                    title=(target.title or job.title).strip(),
+                    description=(target.description or job.description).strip(),
+                    tags=list(target.tags or job.tags or []),
+                    category_id=job.category_id,
+                    privacy_status=job.privacy_status,
+                    publish_at=job.publish_at,
+                    made_for_kids=job.made_for_kids,
+                    default_language=job.default_language,
+                )
 
-                credentials = None
-                video_id = None
                 for attempt in (1, 2):
                     try:
                         credentials = await YouTubeManagementService(

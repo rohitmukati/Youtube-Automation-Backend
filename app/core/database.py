@@ -47,6 +47,9 @@ async def create_tables() -> None:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS title VARCHAR(100)"))
+        await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS description TEXT"))
+        await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS tags JSON"))
     logger.info("Database tables are ready")
 
 

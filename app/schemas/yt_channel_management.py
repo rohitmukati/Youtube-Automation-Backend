@@ -20,6 +20,34 @@ from app.utils.yt_channel_management import (
 )
 
 
+class ChannelUploadMetadata(BaseModel):
+    account_id: uuid.UUID
+    title: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None)
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def validate_channel_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return clean_title(value) if value else None
+
+    @field_validator("description")
+    @classmethod
+    def validate_channel_description(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return clean_description(value) if value else None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_channel_tags(cls, value: list[str]) -> list[str]:
+        return clean_tags(value)
+
+
 class CreateUploadRequest(BaseModel):
     file: DeclaredFile
     client_request_id: Optional[str] = Field(
@@ -40,6 +68,7 @@ class CreateUploadRequest(BaseModel):
     )
     notify_subscribers: bool = True
     thumbnail_file_id: Optional[uuid.UUID] = None
+    channel_metadata: list[ChannelUploadMetadata] = Field(default_factory=list)
 
     @field_validator("title")
     @classmethod
@@ -90,6 +119,9 @@ class UploadTargetResponse(BaseModel):
     account_email: Optional[str] = None
     channel_id: str
     channel_title: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
     status: UploadTargetStatus
     progress_percent: int
     attempts: int
@@ -176,6 +208,24 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class GenerateChannelMetadataRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list)
+    account_ids: list[uuid.UUID] = Field(min_length=1, max_length=settings.yt_upload_max_accounts)
+
+
+class GeneratedChannelMetadata(BaseModel):
+    account_id: uuid.UUID
+    title: str
+    description: str
+    tags: list[str]
+
+
+class GenerateChannelMetadataResponse(BaseModel):
+    channels: list[GeneratedChannelMetadata]
+
+
 class DirectUploadRequest(BaseModel):
     client_request_id: Optional[str] = Field(
         default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$"
@@ -191,10 +241,13 @@ class DirectUploadRequest(BaseModel):
     publish_at: Optional[datetime] = None
     made_for_kids: bool = False
     default_language: Optional[str] = Field(
-        default=None, max_length=20, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+        default=None,
+        max_length=20,
+        pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
     )
     notify_subscribers: bool = True
     thumbnail_file_id: Optional[uuid.UUID] = None
+    channel_metadata: list[ChannelUploadMetadata] = Field(default_factory=list)
 
     @field_validator("title")
     @classmethod

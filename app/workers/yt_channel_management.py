@@ -393,9 +393,9 @@ class YtUploadWorker:
                 size_bytes=asset.size_bytes,
                 content_type=asset.content_type,
                 body=build_video_body(
-                    title=job.title,
-                    description=job.description,
-                    tags=list(job.tags or []),
+                    title=(target.title or job.title).strip(),
+                    description=(target.description or job.description).strip(),
+                    tags=list(target.tags or job.tags or []),
                     category_id=job.category_id,
                     privacy_status=job.privacy_status,
                     publish_at=job.publish_at,
