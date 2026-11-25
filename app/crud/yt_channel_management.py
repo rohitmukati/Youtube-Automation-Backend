@@ -44,6 +44,7 @@ async def create_job(
     made_for_kids: bool,
     default_language: Optional[str],
     notify_subscribers: bool,
+    parallel_upload_limit: int,
     accounts: Sequence[YouTubeAccount],
     channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
 ) -> YtUploadJob:
@@ -66,6 +67,7 @@ async def create_job(
         made_for_kids=made_for_kids,
         default_language=default_language,
         notify_subscribers=notify_subscribers,
+        parallel_upload_limit=parallel_upload_limit,
         status=UploadJobStatus.UPLOADING_MEDIA.value,
         targets=[
             YtUploadTarget(
@@ -106,6 +108,7 @@ async def create_direct_job(
     source_file_name: str,
     source_content_type: str,
     source_size_bytes: int,
+    parallel_upload_limit: int,
     accounts: Sequence[YouTubeAccount],
     channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
 ) -> YtUploadJob:
@@ -309,6 +312,21 @@ async def claim_next_target(
     target = (await session.execute(statement)).scalar_one_or_none()
     if target is None:
         return None
+
+    job_limit = await session.scalar(
+        select(YtUploadJob.parallel_upload_limit).where(YtUploadJob.id == target.job_id)
+    )
+    uploading_in_job = await session.scalar(
+        select(func.count())
+        .select_from(YtUploadTarget)
+        .where(
+            YtUploadTarget.job_id == target.job_id,
+            YtUploadTarget.status == UploadTargetStatus.UPLOADING.value,
+        )
+    )
+    if int(uploading_in_job or 0) >= max(1, int(job_limit or 1)):
+        return None
+
     size = await session.scalar(
         select(YtUploadJob.source_size_bytes).where(YtUploadJob.id == target.job_id)
     )

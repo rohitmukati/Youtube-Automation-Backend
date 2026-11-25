@@ -430,6 +430,7 @@ def upload_local_file_sync(
     content_type: str,
     body: dict,
     notify_subscribers: bool,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> str:
     """Upload one local temp file directly to YouTube."""
     youtube = _build_youtube(credentials)
@@ -437,14 +438,24 @@ def upload_local_file_sync(
         file_path,
         mimetype=content_type,
         resumable=True,
-        chunksize=-1,
+        chunksize=settings.yt_upload_chunk_bytes,
     )
-    response = youtube.videos().insert(
+    request = youtube.videos().insert(
         part="snippet,status",
         body=body,
         media_body=media,
         notifySubscribers="true" if notify_subscribers else "false",
-    ).execute(num_retries=0)
+    )
+
+    response = None
+    while response is None:
+        status, response = request.next_chunk(num_retries=0)
+        if status is not None:
+            uploaded = int(status.resumable_progress)
+            total = int(status.total_size)
+            if on_progress is not None:
+                on_progress(uploaded, total)
+
     video_id = response.get("id")
     if not video_id:
         raise UploadFailureError(

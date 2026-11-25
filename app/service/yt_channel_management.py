@@ -49,6 +49,7 @@ from app.service.yt_management import YouTubeManagementService
 from app.service.yt_media_upload import YtMediaUploadService
 from app.utils import bucket
 from app.utils.datetime_utils import ensure_utc, utc_now
+from app.utils.upload_resources import calculate_parallel_upload_limit
 from app.utils.yt_ai_insights import parse_model_json
 from app.utils.yt_channel_management import (
     ACTIVE_TARGET_STATUSES,
@@ -95,6 +96,7 @@ def _summary_data(job: YtUploadJob, asset: Optional[YtMediaAsset]) -> dict:
         "media_expires_at": asset.expires_at if asset is not None else None,
         "source_file_name": job.source_file_name,
         "source_size_bytes": job.source_size_bytes,
+        "parallel_upload_limit": getattr(job, "parallel_upload_limit", 1),
         "total_channels": len(job.targets),
         "done_count": counts[UploadTargetStatus.DONE.value],
         "failed_count": counts[UploadTargetStatus.FAILED.value],
@@ -178,6 +180,12 @@ class YtChannelManagementService:
 
         asset = await self._media.start_session(user_id, payload.file)
         try:
+            capacity = calculate_parallel_upload_limit(
+                asset.size_bytes,
+                len(payload.account_ids),
+            )
+            parallel_upload_limit = capacity.limit
+
             job = await crud.create_job(
                 self._session,
                 user_id=user_id,
@@ -195,6 +203,7 @@ class YtChannelManagementService:
                 notify_subscribers=payload.notify_subscribers,
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
                 channel_metadata=_channel_metadata_map(payload),
+                parallel_upload_limit=parallel_upload_limit,
             )
             await self._session.commit()
         except IntegrityError:
@@ -343,6 +352,17 @@ class YtChannelManagementService:
             with open(temp_path, "wb") as target:
                 shutil.copyfileobj(upload.file, target)
 
+            capacity = calculate_parallel_upload_limit(
+                size,
+                len(payload.account_ids),
+            )
+            parallel_upload_limit = capacity.limit
+            logger.info(
+                "Adaptive upload limit for job: %s channels concurrently (%s)",
+                parallel_upload_limit,
+                capacity.reason,
+            )
+
             job = await crud.create_direct_job(
                 self._session,
                 user_id=user_id,
@@ -360,12 +380,18 @@ class YtChannelManagementService:
                 source_file_name=original_name,
                 source_content_type=content_type,
                 source_size_bytes=size,
+                parallel_upload_limit=parallel_upload_limit,
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
                 channel_metadata=_channel_metadata_map(payload),
             )
             await self._session.commit()
 
-            for target in job.targets:
+            pending_targets = list(job.targets)
+            active_tasks: dict[asyncio.Task, YtUploadTarget] = {}
+
+            loop = asyncio.get_running_loop()
+
+            async def run_target(target: YtUploadTarget):
                 body = build_video_body(
                     title=(target.title or job.title).strip(),
                     description=(target.description or job.description).strip(),
@@ -377,11 +403,45 @@ class YtChannelManagementService:
                     default_language=job.default_language,
                 )
 
+                credentials = None
                 for attempt in (1, 2):
                     try:
-                        credentials = await YouTubeManagementService(
-                            self._session
-                        ).get_fresh_credentials(user_id, target.account_id)
+                        from app.core.database import SessionFactory
+                        async with SessionFactory() as target_session:
+                            credentials = await YouTubeManagementService(
+                                target_session
+                            ).get_fresh_credentials(user_id, target.account_id)
+
+                        last_logged_percent = {"value": -1}
+
+                        def on_direct_progress(uploaded: int, total: int) -> None:
+                            percent = min(int(uploaded * 100 / max(total, 1)), 99)
+                            if percent == last_logged_percent["value"]:
+                                return
+                            last_logged_percent["value"] = percent
+
+                            def update_progress() -> None:
+                                target.progress_percent = percent
+                                target.bytes_confirmed = uploaded
+
+                            loop.call_soon_threadsafe(update_progress)
+                            logger.info(
+                                "UPLOAD_PROGRESS job=%s channel=%s target=%s %d%% (%d/%d bytes)",
+                                job.id,
+                                target.channel_title,
+                                target.id,
+                                percent,
+                                uploaded,
+                                total,
+                            )
+
+                        logger.info(
+                            "UPLOAD_START job=%s channel=%s target=%s parallel_limit=%d",
+                            job.id,
+                            target.channel_title,
+                            target.id,
+                            parallel_upload_limit,
+                        )
                         video_id = await asyncio.to_thread(
                             youtube_api.upload_local_file_sync,
                             credentials,
@@ -389,62 +449,133 @@ class YtChannelManagementService:
                             content_type=content_type,
                             body=body,
                             notify_subscribers=payload.notify_subscribers,
+                            on_progress=on_direct_progress,
                         )
-                        break
+                        return video_id, credentials, attempt, None
                     except Exception as exc:
-                        target.attempts = attempt
+                        failure = classify_error(exc)
                         if attempt == 2:
-                            failure = classify_error(exc)
-                            await crud.mark_target_failed(
-                                self._session,
-                                target,
-                                code=failure.code,
-                                message=failure.message,
-                                now=utc_now(),
-                            )
-                            await self._session.commit()
-                            continue
+                            return None, credentials, attempt, failure
 
-                if video_id is None:
-                    continue
+                return None, credentials, 2, classify_error(
+                    RuntimeError("Upload retry failed")
+                )
 
-                target.status = UploadTargetStatus.DONE.value
-                target.progress_percent = 100
-                target.youtube_video_id = video_id
-                target.youtube_url = watch_url(video_id)
-                target.error_code = None
-                target.error_message = None
-                target.finished_at = utc_now()
-
-                if thumbnail is not None and credentials is not None:
-                    try:
-                        signed_url = await bucket.create_signed_url(thumbnail.storage_path)
-                        thumb_data = await asyncio.to_thread(
-                            youtube_api.fetch_bytes_sync,
-                            signed_url,
-                            max_bytes=settings.yt_thumbnail_max_bytes,
-                            timeout=settings.yt_upload_http_timeout_seconds,
-                        )
-                        await asyncio.to_thread(
-                            youtube_api.set_thumbnail_sync,
-                            credentials,
-                            video_id=video_id,
-                            data=thumb_data,
-                            content_type=thumbnail.content_type,
-                        )
-                        await crud.set_thumbnail_result(
-                            self._session, target.id,
-                            status=ThumbnailStatus.DONE,
-                            error=None,
-                        )
-                    except Exception as thumb_error:
-                        await crud.set_thumbnail_result(
-                            self._session, target.id,
-                            status=ThumbnailStatus.FAILED,
-                            error=str(thumb_error),
-                        )
+            while pending_targets or active_tasks:
+                while pending_targets and len(active_tasks) < parallel_upload_limit:
+                    target = pending_targets.pop(0)
+                    target.status = UploadTargetStatus.UPLOADING.value
+                    target.attempts = max(1, target.attempts + 1)
+                    target.started_at = target.started_at or utc_now()
+                    active_tasks[asyncio.create_task(run_target(target))] = target
 
                 await self._session.commit()
+
+                if not active_tasks:
+                    break
+
+                done, _ = await asyncio.wait(
+                    active_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in done:
+                    target = active_tasks.pop(task)
+                    video_id, credentials, attempts, failure = task.result()
+                    target.attempts = attempts
+
+                    if failure is not None or video_id is None:
+                        logger.warning(
+                            "UPLOAD_FAILED job=%s channel=%s target=%s code=%s message=%s",
+                            job.id,
+                            target.channel_title,
+                            target.id,
+                            failure.code if failure is not None else "no_video_id",
+                            failure.message
+                            if failure is not None
+                            else "YouTube did not return a video ID",
+                        )
+                        await crud.mark_target_failed(
+                            self._session,
+                            target,
+                            code=failure.code
+                            if failure is not None
+                            else "no_video_id",
+                            message=failure.message
+                            if failure is not None
+                            else "YouTube did not return a video ID",
+                            now=utc_now(),
+                        )
+                    else:
+                        target.status = UploadTargetStatus.DONE.value
+                        target.progress_percent = 100
+                        target.bytes_confirmed = size
+                        target.youtube_video_id = video_id
+                        target.youtube_url = watch_url(video_id)
+                        target.error_code = None
+                        target.error_message = None
+                        target.finished_at = utc_now()
+
+                        logger.info(
+                            "UPLOAD_COMPLETE job=%s channel=%s target=%s video=%s 100%%",
+                            job.id,
+                            target.channel_title,
+                            target.id,
+                            video_id,
+                        )
+
+                        if thumbnail is not None and credentials is not None:
+                            try:
+                                signed_url = await bucket.create_signed_url(
+                                    thumbnail.storage_path
+                                )
+                                thumb_data = await asyncio.to_thread(
+                                    youtube_api.fetch_bytes_sync,
+                                    signed_url,
+                                    max_bytes=settings.yt_thumbnail_max_bytes,
+                                    timeout=settings.yt_upload_http_timeout_seconds,
+                                )
+                                await asyncio.to_thread(
+                                    youtube_api.set_thumbnail_sync,
+                                    credentials,
+                                    video_id=video_id,
+                                    data=thumb_data,
+                                    content_type=thumbnail.content_type,
+                                )
+                                await crud.set_thumbnail_result(
+                                    self._session,
+                                    target.id,
+                                    status=ThumbnailStatus.DONE,
+                                    error=None,
+                                )
+                            except Exception as thumb_error:
+                                await crud.set_thumbnail_result(
+                                    self._session,
+                                    target.id,
+                                    status=ThumbnailStatus.FAILED,
+                                    error=str(thumb_error),
+                                )
+
+                    await self._session.commit()
+
+                    done_count = sum(
+                        1
+                        for item in job.targets
+                        if item.status == UploadTargetStatus.DONE.value
+                    )
+                    failed_count = sum(
+                        1
+                        for item in job.targets
+                        if item.status == UploadTargetStatus.FAILED.value
+                    )
+                    logger.info(
+                        "UPLOAD_JOB_SUMMARY job=%s completed=%d/%d failed=%d active=%d",
+                        job.id,
+                        done_count,
+                        len(job.targets),
+                        failed_count,
+                        len(active_tasks),
+                    )
 
             await crud.refresh_job_status(self._session, job.id)
             await self._session.commit()
@@ -545,11 +676,15 @@ class YtChannelManagementService:
             offset=offset,
         )
 
-    async def get_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
+    async def get_upload(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
         return _to_detail(job, await self._load_emails([job]), await self._asset_of(job))
 
-    async def retry_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
+    async def retry_upload(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> UploadJobDetail:
         await ensure_configured(self._session, user_id)
         job = await self._get_job(user_id, job_id)
         failed = [
@@ -598,7 +733,9 @@ class YtChannelManagementService:
         fresh = await self._get_job(user_id, job_id)
         return _to_detail(fresh, await self._load_emails([fresh]), asset)
 
-    async def cancel_upload(self, user_id: uuid.UUID, job_id: uuid.UUID) -> UploadJobDetail:
+    async def cancel_upload(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> UploadJobDetail:
         job = await self._get_job(user_id, job_id)
         cancelled = await crud.cancel_active_targets(
             self._session, job.id, now=utc_now()
@@ -614,7 +751,11 @@ class YtChannelManagementService:
             await self._discard_quietly(job.media_asset_id)
 
         fresh = await self._get_job(user_id, job_id)
-        return _to_detail(fresh, await self._load_emails([fresh]), await self._asset_of(fresh))
+        return _to_detail(
+            fresh,
+            await self._load_emails([fresh]),
+            await self._asset_of(fresh),
+        )
 
     async def _discard_quietly(self, asset_id: uuid.UUID) -> None:
         try:
@@ -637,7 +778,9 @@ class YtChannelManagementService:
             resets_at=next_quota_reset(now),
         )
 
-    async def _get_job(self, user_id: uuid.UUID, job_id: uuid.UUID) -> YtUploadJob:
+    async def _get_job(
+        self, user_id: uuid.UUID, job_id: uuid.UUID
+    ) -> YtUploadJob:
         job = await crud.get_job(self._session, job_id, user_id)
         if job is None:
             raise NotFoundError("Upload not found.")
@@ -655,7 +798,9 @@ class YtChannelManagementService:
             record.file_type != StorageFileType.IMAGE.value
             or record.content_type not in settings.yt_thumbnail_content_types
         ):
-            raise ValidationError("The thumbnail must be a JPG or PNG image from your library.")
+            raise ValidationError(
+                "The thumbnail must be a JPG or PNG image from your library."
+            )
         return record
 
     async def _get_uploadable_accounts(
@@ -669,7 +814,7 @@ class YtChannelManagementService:
         ]
         if missing:
             raise NotFoundError(
-                "Some of the selected YouTube channels were not found or are disconnected."
+                "Some of the selected YouTube channels were not found or disconnected."
             )
         needs_reconnect = [
             accounts[account_id].nickname
@@ -678,7 +823,9 @@ class YtChannelManagementService:
         ]
         if needs_reconnect:
             raise ValidationError(
-                "Reconnect these channels before uploading: " + ", ".join(needs_reconnect) + "."
+                "Reconnect these channels before uploading: "
+                + ", ".join(needs_reconnect)
+                + "."
             )
         return accounts
 

@@ -147,6 +147,7 @@ class UploadJobSummary(BaseModel):
     media_expires_at: Optional[datetime] = None
     source_file_name: str
     source_size_bytes: int
+    parallel_upload_limit: int = 1
     total_channels: int
     done_count: int
     failed_count: int

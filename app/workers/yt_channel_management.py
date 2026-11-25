@@ -77,6 +77,7 @@ class _Plan:
     job_id: uuid.UUID
     user_id: uuid.UUID
     account_id: uuid.UUID
+    channel_title: str
     source_key: str
     size_bytes: int
     content_type: str
@@ -113,6 +114,12 @@ class YtUploadWorker:
 
         while not self._stop_event.is_set():
             running = {task for task in running if not task.done()}
+
+            logger.info(
+                "UPLOAD_WORKER_SLOTS active=%d/%d",
+                len(running),
+                settings.yt_upload_concurrency,
+            )
 
             if time.monotonic() - last_sweep >= settings.yt_upload_stale_sweep_seconds:
                 last_sweep = time.monotonic()
@@ -389,6 +396,7 @@ class YtUploadWorker:
                 job_id=job.id,
                 user_id=job.user_id,
                 account_id=target.account_id,
+                channel_title=target.channel_title,
                 source_key=asset.object_key,
                 size_bytes=asset.size_bytes,
                 content_type=asset.content_type,
@@ -497,6 +505,15 @@ class YtUploadWorker:
             alive = asyncio.run_coroutine_threadsafe(
                 self._progress(plan, percent, confirmed), loop
             ).result(timeout=60)
+            logger.info(
+                "UPLOAD_PROGRESS job=%s channel=%s target=%s %d%% (%d/%d bytes)",
+                plan.job_id,
+                plan.channel_title,
+                plan.target_id,
+                percent,
+                confirmed,
+                plan.size_bytes,
+            )
             if not alive:
                 cancel.set()
 
@@ -565,6 +582,13 @@ class YtUploadWorker:
             return
         await self._refresh_jobs({plan.job_id})
         logger.info("Target %s uploaded as video %s", plan.target_id, video_id)
+        logger.info(
+            "UPLOAD_COMPLETE job=%s channel=%s target=%s video=%s 100%%",
+            plan.job_id,
+            plan.channel_title,
+            plan.target_id,
+            video_id,
+        )
 
     async def _cleanup_if_completed(self, job_id: uuid.UUID) -> None:
         try:
