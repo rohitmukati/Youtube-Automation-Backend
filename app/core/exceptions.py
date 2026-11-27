@@ -232,3 +232,46 @@ class MediaExpiredError(ConflictError):
 class StagingBusyError(ServiceUnavailableError):
     code = "staging_busy"
     message = "Uploads are very busy right now. Please try again in a few minutes."
+
+
+class InvalidVideoUrlError(BadRequestError):
+    code = "invalid_video_url"
+    message = "Please paste a valid YouTube or Instagram video link."
+
+
+class VideoNotAvailableError(BadRequestError):
+    code = "video_not_available"
+    message = "This video is private, removed or not available for download."
+
+
+class VideoNotAllowedError(BadRequestError):
+    code = "video_not_allowed"
+    message = "This video cannot be downloaded (live stream or too long)."
+
+
+class DownloaderUnavailableError(ServiceUnavailableError):
+    code = "downloader_unavailable"
+    message = "The video downloader is not available right now. Please try again later."
+
+
+class DownloaderBlockedError(ServiceUnavailableError):
+    code = "downloader_blocked"
+    message = (
+        "The video site blocked our server for this request. "
+        "Please try again in a few minutes or try another video."
+    )
+
+
+class DownloaderFailedError(ServiceUnavailableError):
+    code = "downloader_failed"
+    message = "We could not read this video right now. Please check the link and try again."
+
+
+class DownloaderBusyError(TooManyAttemptsError):
+    code = "downloader_busy"
+    message = "The downloader is busy right now. Please wait a moment and try again."
+
+
+class DownloadLinkExpiredError(BadRequestError):
+    code = "download_link_expired"
+    message = "This download link has expired. Go back and press Download again."

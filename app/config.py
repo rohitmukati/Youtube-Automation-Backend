@@ -195,6 +195,40 @@ class Settings(BaseSettings):
     yt_ai_description_max_chars: ClassVar[int] = 1500
     yt_ai_list_default_limit: ClassVar[int] = 20
 
+    # ── Video downloader (stream-through, nothing is stored) ──
+    downloader_enabled: ClassVar[bool] = True
+    downloader_allowed_hosts: ClassVar[List[str]] = [
+        "youtube.com",
+        "youtu.be",
+        "instagram.com",
+    ]
+    downloader_cdn_hosts: ClassVar[List[str]] = [
+        "googlevideo.com",
+        "youtube.com",
+        "cdninstagram.com",
+        "fbcdn.net",
+    ]
+    downloader_url_max_length: ClassVar[int] = 2048
+    downloader_extract_timeout_seconds: ClassVar[int] = 60
+    downloader_extract_concurrency: ClassVar[int] = 2
+    downloader_info_cache_seconds: ClassVar[int] = 600
+    downloader_info_cache_max_items: ClassVar[int] = 50
+    downloader_info_per_minute: ClassVar[int] = 10
+    downloader_prepare_per_minute: ClassVar[int] = 10
+    downloader_token_ttl_seconds: ClassVar[int] = 300
+    # Total downloads streaming at the same time on this server (not per user).
+    # Each HD download runs one ffmpeg process, so keep it low on small hosts.
+    downloader_max_concurrent_streams: ClassVar[int] = 5
+    downloader_stream_idle_seconds: ClassVar[int] = 180
+    downloader_max_duration_seconds: ClassVar[int] = 2 * 3600
+    downloader_max_filesize_bytes: ClassVar[int] = 1536 * 1024 * 1024
+    downloader_chunk_bytes: ClassVar[int] = 10 * 1024 * 1024
+    downloader_connect_timeout_seconds: ClassVar[int] = 15
+    downloader_read_timeout_seconds: ClassVar[int] = 60
+    downloader_max_height: ClassVar[int] = 2160
+    downloader_filename_max_length: ClassVar[int] = 120
+    downloader_js_runtimes: ClassVar[List[str]] = ["deno", "node"]
+
     # ── Loaded from .env / environment variables ──────────────
     database_url: SecretStr
     jwt_secret_key: SecretStr
@@ -233,6 +267,15 @@ class Settings(BaseSettings):
     # GEMINI_MODEL_FAST / GEMINI_MODEL_DEEP can be changed without touching the code
     gemini_model_fast: str = "gemini-3.5-flash"
     gemini_model_deep: str = "gemini-3.5-flash"
+
+    # Video downloader (all optional).
+    # YTDLP_COOKIES_FILE=/etc/secrets/cookies.txt  (Netscape format; helps with Instagram and
+    #   with YouTube "confirm you are not a bot" checks)
+    # YTDLP_PROXY=http://user:pass@host:port       (residential proxy if YouTube blocks the server IP)
+    # FFMPEG_PATH=/usr/bin/ffmpeg                  (otherwise ffmpeg on PATH or imageio-ffmpeg is used)
+    ytdlp_cookies_file: Optional[str] = None
+    ytdlp_proxy: Optional[str] = None
+    ffmpeg_path: Optional[str] = None
 
     @field_validator("cors_origins", mode="before")
     @classmethod
