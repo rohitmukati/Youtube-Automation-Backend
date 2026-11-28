@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, status
 
 from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession, get_email_service
+from app.core.rate_limit import rate_limit
 from app.schemas.auth import (
     AuthResponse,
     ForgotPasswordRequest,
@@ -21,17 +22,30 @@ from app.service.email import EmailService
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-@router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/signup",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("auth_signup"))],
+)
 async def signup(payload: SignupRequest, session: DbSession) -> AuthResponse:
     return await AuthService(session).signup(payload)
 
 
-@router.post("/login", response_model=AuthResponse)
+@router.post(
+    "/login",
+    response_model=AuthResponse,
+    dependencies=[Depends(rate_limit("auth_login"))],
+)
 async def login(payload: LoginRequest, session: DbSession) -> AuthResponse:
     return await AuthService(session).login(payload)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limit("auth_refresh"))],
+)
 async def refresh(payload: RefreshTokenRequest, session: DbSession) -> TokenResponse:
     return await AuthService(session).refresh(payload.refresh_token)
 
@@ -42,7 +56,11 @@ async def logout(payload: RefreshTokenRequest, session: DbSession) -> MessageRes
     return MessageResponse(message="You have been logged out successfully.")
 
 
-@router.post("/forgot-password", response_model=MessageResponse)
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit("auth_forgot_password"))],
+)
 async def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
@@ -60,7 +78,11 @@ async def forgot_password(
     )
 
 
-@router.post("/reset-password", response_model=MessageResponse)
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit("auth_reset_password"))],
+)
 async def reset_password(payload: ResetPasswordRequest, session: DbSession) -> MessageResponse:
     await AuthService(session).reset_password(payload)
     return MessageResponse(

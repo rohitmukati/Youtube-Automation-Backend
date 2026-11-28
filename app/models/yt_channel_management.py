@@ -73,6 +73,12 @@ class YtUploadJob(TimestampMixin, Base):
     made_for_kids: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     default_language: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     notify_subscribers: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Optional video settings. NULL = the user did not choose, so YouTube's default is used.
+    default_audio_language: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    contains_synthetic_media: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    license: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    embeddable: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    public_stats_viewable: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     parallel_upload_limit: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )

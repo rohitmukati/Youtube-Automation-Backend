@@ -10,6 +10,7 @@ from app.schemas.yt_media_upload import DeclaredFile, MediaUploadInfo
 from app.utils.datetime_utils import utc_now
 from app.utils.yt_media_upload import MediaAssetStatus
 from app.utils.yt_channel_management import (
+    LicenseType,
     PrivacyStatus,
     ThumbnailStatus,
     UploadJobStatus,
@@ -67,6 +68,16 @@ class CreateUploadRequest(BaseModel):
         default=None, max_length=20, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
     )
     notify_subscribers: bool = True
+    # Optional. Leave out (null) to keep YouTube's own default.
+    default_audio_language: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+    )
+    contains_synthetic_media: Optional[bool] = None
+    license: Optional[LicenseType] = None
+    embeddable: Optional[bool] = None
+    public_stats_viewable: Optional[bool] = None
     thumbnail_file_id: Optional[uuid.UUID] = None
     channel_metadata: list[ChannelUploadMetadata] = Field(default_factory=list)
 
@@ -165,6 +176,11 @@ class UploadJobDetail(UploadJobSummary):
     made_for_kids: bool
     default_language: Optional[str] = None
     notify_subscribers: bool
+    default_audio_language: Optional[str] = None
+    contains_synthetic_media: Optional[bool] = None
+    license: Optional[LicenseType] = None
+    embeddable: Optional[bool] = None
+    public_stats_viewable: Optional[bool] = None
     source_content_type: str
     thumbnail_file_id: Optional[uuid.UUID] = None
     thumbnail_file_name: Optional[str] = None
@@ -247,6 +263,16 @@ class DirectUploadRequest(BaseModel):
         pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
     )
     notify_subscribers: bool = True
+    # Optional. Leave out (null) to keep YouTube's own default.
+    default_audio_language: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+    )
+    contains_synthetic_media: Optional[bool] = None
+    license: Optional[LicenseType] = None
+    embeddable: Optional[bool] = None
+    public_stats_viewable: Optional[bool] = None
     thumbnail_file_id: Optional[uuid.UUID] = None
     channel_metadata: list[ChannelUploadMetadata] = Field(default_factory=list)
 

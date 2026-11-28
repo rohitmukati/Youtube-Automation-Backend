@@ -71,6 +71,19 @@ class TooManyAttemptsError(AppException):
     message = "Too many attempts. Please request a new code and try again."
 
 
+class RateLimitedError(TooManyAttemptsError):
+    code = "rate_limited"
+    message = "You are doing that too often. Please wait a moment and try again."
+
+    def __init__(self, retry_after: int = 1, message=None) -> None:
+        retry_after = max(1, int(retry_after))
+        super().__init__(
+            message,
+            headers={"Retry-After": str(retry_after)},
+        )
+        self.retry_after = retry_after
+
+
 class ServiceUnavailableError(AppException):
     status_code = 503
     code = "service_unavailable"

@@ -17,6 +17,11 @@ class PrivacyStatus(str, enum.Enum):
     PRIVATE = "private"
 
 
+class LicenseType(str, enum.Enum):
+    YOUTUBE = "youtube"
+    CREATIVE_COMMON = "creativeCommon"
+
+
 class UploadJobStatus(str, enum.Enum):
     UPLOADING_MEDIA = "uploading_media"
     QUEUED = "queued"
@@ -231,7 +236,18 @@ def build_video_body(
     publish_at: Optional[datetime],
     made_for_kids: bool,
     default_language: Optional[str],
+    default_audio_language: Optional[str] = None,
+    contains_synthetic_media: Optional[bool] = None,
+    license: Optional[str] = None,
+    embeddable: Optional[bool] = None,
+    public_stats_viewable: Optional[bool] = None,
 ) -> dict[str, Any]:
+    """Build the videos.insert body.
+
+    Every field after ``default_language`` is optional. ``None`` means "the user did
+    not choose", and then the field is NOT sent, so YouTube keeps its own default.
+    That keeps old jobs and the current publish form working exactly as before.
+    """
     snippet: dict[str, Any] = {
         "title": title,
         "description": description,
@@ -241,13 +257,37 @@ def build_video_body(
         snippet["tags"] = tags
     if default_language:
         snippet["defaultLanguage"] = default_language
+    if default_audio_language:
+        snippet["defaultAudioLanguage"] = default_audio_language
     status: dict[str, Any] = {
         "privacyStatus": privacy_status,
         "selfDeclaredMadeForKids": made_for_kids,
     }
     if publish_at is not None:
         status["publishAt"] = ensure_utc(publish_at).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if contains_synthetic_media is not None:
+        status["containsSyntheticMedia"] = bool(contains_synthetic_media)
+    if license:
+        status["license"] = license
+    if embeddable is not None:
+        status["embeddable"] = bool(embeddable)
+    if public_stats_viewable is not None:
+        status["publicStatsViewable"] = bool(public_stats_viewable)
     return {"snippet": snippet, "status": status}
+
+
+def body_options_from_job(job: Any) -> dict[str, Any]:
+    """The optional video settings stored on a job, ready to pass to build_video_body.
+
+    ``getattr`` keeps this safe for jobs created before these columns existed.
+    """
+    return {
+        "default_audio_language": getattr(job, "default_audio_language", None),
+        "contains_synthetic_media": getattr(job, "contains_synthetic_media", None),
+        "license": getattr(job, "license", None),
+        "embeddable": getattr(job, "embeddable", None),
+        "public_stats_viewable": getattr(job, "public_stats_viewable", None),
+    }
 
 
 def http_status(exc: BaseException) -> Optional[int]:

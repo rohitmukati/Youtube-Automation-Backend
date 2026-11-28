@@ -40,6 +40,7 @@ from app.utils.yt_channel_management import (
     UploadInterrupted,
     UploadJobStatus,
     UploadTargetStatus,
+    body_options_from_job,
     build_video_body,
     classify_error,
     next_quota_reset,
@@ -409,6 +410,7 @@ class YtUploadWorker:
                     publish_at=job.publish_at,
                     made_for_kids=job.made_for_kids,
                     default_language=job.default_language,
+                    **body_options_from_job(job),
                 ),
                 notify_subscribers=job.notify_subscribers,
                 wants_thumbnail=job.thumbnail_file_id is not None

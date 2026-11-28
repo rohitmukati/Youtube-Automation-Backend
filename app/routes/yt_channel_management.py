@@ -3,10 +3,11 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Query, status, File, Form, UploadFile
+from fastapi import APIRouter, Depends, Query, status, File, Form, UploadFile
 
 from app.config import settings
 from app.core.dependencies import CurrentUser, DbSession
+from app.core.rate_limit import rate_limit
 from app.schemas.yt_channel_management import (
     CreateUploadRequest,
     DirectUploadRequest,
@@ -28,6 +29,7 @@ router = APIRouter(prefix="/yt-channels", tags=["YouTube Channel Management"])
     "/uploads/metadata/generate",
     response_model=GenerateChannelMetadataResponse,
     summary="Generate engaging metadata for selected YouTube channels",
+    dependencies=[Depends(rate_limit("upload_ai_metadata", scope="user"))],
 )
 async def generate_channel_metadata(
     payload: GenerateChannelMetadataRequest,
@@ -44,6 +46,7 @@ async def generate_channel_metadata(
     response_model=UploadJobDetail,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a video directly and publish sequentially",
+    dependencies=[Depends(rate_limit("upload_create", scope="user"))],
 )
 async def create_direct_upload(
     current_user: CurrentUser,
@@ -62,6 +65,7 @@ async def create_direct_upload(
     response_model=StartUploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Start publishing one video to many YouTube channels",
+    dependencies=[Depends(rate_limit("upload_create", scope="user"))],
     description=(
         "Send the video's name, size and type together with the title, description, "
         "tags and the channels. Nothing is uploaded until you call this. The response "
@@ -176,6 +180,7 @@ async def complete_media(
     "/uploads/{job_id}/retry",
     response_model=UploadJobDetail,
     summary="Retry the channels that failed",
+    dependencies=[Depends(rate_limit("upload_actions", scope="user"))],
 )
 async def retry_upload(
     job_id: uuid.UUID,
@@ -189,6 +194,7 @@ async def retry_upload(
     "/uploads/{job_id}/cancel",
     response_model=UploadJobDetail,
     summary="Cancel the channels that have not finished",
+    dependencies=[Depends(rate_limit("upload_actions", scope="user"))],
 )
 async def cancel_upload(
     job_id: uuid.UUID,

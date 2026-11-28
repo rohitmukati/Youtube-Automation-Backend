@@ -25,7 +25,6 @@ class Settings(BaseSettings):
 
     db_pool_size: ClassVar[int] = 5
     db_max_overflow: ClassVar[int] = 10
-    db_auto_create_tables: ClassVar[bool] = True
 
     jwt_algorithm: ClassVar[str] = "HS256"
     access_token_expire_minutes: ClassVar[int] = 30
@@ -229,7 +228,49 @@ class Settings(BaseSettings):
     downloader_filename_max_length: ClassVar[int] = 120
     downloader_js_runtimes: ClassVar[List[str]] = ["deno", "node"]
 
+    # ── Redis (rate limits now, Celery queue next) ──
+    redis_connect_timeout_seconds: ClassVar[float] = 2.0
+    redis_socket_timeout_seconds: ClassVar[float] = 2.0
+    health_timeout_seconds: ClassVar[float] = 3.0
+    redis_max_connections: ClassVar[int] = 50
+    redis_health_check_interval_seconds: ClassVar[int] = 30
+    redis_key_prefix: ClassVar[str] = "hubbly"
+    # After a Redis error the limiter skips Redis for this long instead of retrying
+    # (and waiting for a timeout) on every request.
+    redis_failure_cooldown_seconds: ClassVar[float] = 10.0
+
+    # ── Rate limits: name -> (max requests, window in seconds) ──
+    # "ip" rules count per client address, "user" rules per logged-in user.
+    rate_limit_enabled: ClassVar[bool] = True
+    rate_limits: ClassVar[dict] = {
+        "auth_login": (20, 300),
+        "auth_signup": (10, 3600),
+        "auth_forgot_password": (5, 900),
+        "auth_reset_password": (10, 900),
+        "auth_refresh": (60, 300),
+        "upload_create": (30, 600),
+        "upload_ai_metadata": (20, 600),
+        "upload_actions": (60, 300),
+    }
+
+    # ── Observability ──
+    sentry_traces_sample_rate: ClassVar[float] = 0.0
+    request_id_header: ClassVar[str] = "X-Request-ID"
+
     # ── Loaded from .env / environment variables ──────────────
+    # Set DB_AUTO_CREATE_TABLES=false in production and use `alembic upgrade head`.
+    db_auto_create_tables: bool = True
+
+    # REDIS_URL=redis://localhost:6379/0   (rediss:// for TLS, e.g. ElastiCache with encryption)
+    # Not set = no Redis: limits fall back to per-process memory (fine for local dev only).
+    redis_url: Optional[SecretStr] = None
+
+    # How many reverse proxies sit in front of the app (load balancer, CDN...).
+    # 0 = trust only the direct connection. Behind one AWS load balancer use 1.
+    trusted_proxy_hops: int = 0
+
+    # SENTRY_DSN=https://...  (empty = Sentry off)
+    sentry_dsn: Optional[str] = None
     database_url: SecretStr
     jwt_secret_key: SecretStr
 
@@ -318,6 +359,25 @@ class Settings(BaseSettings):
             )
         return SecretStr(raw)
 
+    @field_validator("redis_url")
+    @classmethod
+    def validate_redis_url(cls, value: Optional[SecretStr]) -> Optional[SecretStr]:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        if not raw:
+            return None
+        if not raw.startswith(("redis://", "rediss://")):
+            raise ValueError("REDIS_URL must start with redis:// or rediss://")
+        return SecretStr(raw)
+
+    @field_validator("trusted_proxy_hops")
+    @classmethod
+    def validate_trusted_proxy_hops(cls, value: int) -> int:
+        if value < 0 or value > 5:
+            raise ValueError("TRUSTED_PROXY_HOPS must be between 0 and 5")
+        return value
+
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_jwt_secret(cls, value: SecretStr) -> SecretStr:
@@ -331,6 +391,10 @@ class Settings(BaseSettings):
         if value is None:
             return value
         return SecretStr(value.get_secret_value().replace(" ", ""))
+
+    @property
+    def redis_configured(self) -> bool:
+        return self.redis_url is not None
 
     @property
     def is_production(self) -> bool:

@@ -50,6 +50,16 @@ async def create_tables() -> None:
         await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS title VARCHAR(100)"))
         await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS description TEXT"))
         await connection.execute(text("ALTER TABLE yt_upload_targets ADD COLUMN IF NOT EXISTS tags JSON"))
+        for ddl in (
+            "default_audio_language VARCHAR(20)",
+            "contains_synthetic_media BOOLEAN",
+            "license VARCHAR(20)",
+            "embeddable BOOLEAN",
+            "public_stats_viewable BOOLEAN",
+        ):
+            await connection.execute(
+                text(f"ALTER TABLE yt_upload_jobs ADD COLUMN IF NOT EXISTS {ddl}")
+            )
     logger.info("Database tables are ready")
 
 

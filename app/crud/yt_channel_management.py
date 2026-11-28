@@ -47,6 +47,7 @@ async def create_job(
     parallel_upload_limit: int,
     accounts: Sequence[YouTubeAccount],
     channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
+    video_options: Optional[dict] = None,
 ) -> YtUploadJob:
     job = YtUploadJob(
         id=uuid.uuid4(),
@@ -67,6 +68,7 @@ async def create_job(
         made_for_kids=made_for_kids,
         default_language=default_language,
         notify_subscribers=notify_subscribers,
+        **(video_options or {}),
         parallel_upload_limit=parallel_upload_limit,
         status=UploadJobStatus.UPLOADING_MEDIA.value,
         targets=[
@@ -76,6 +78,9 @@ async def create_job(
                 channel_id=account.channel_id,
                 channel_title=account.channel_title,
                 account_nickname=account.nickname,
+                title=(channel_metadata or {}).get(account.id, {}).get("title"),
+                description=(channel_metadata or {}).get(account.id, {}).get("description"),
+                tags=(channel_metadata or {}).get(account.id, {}).get("tags") or None,
                 status=UploadTargetStatus.PENDING.value,
                 progress_percent=0,
                 attempts=0,
@@ -111,6 +116,7 @@ async def create_direct_job(
     parallel_upload_limit: int,
     accounts: Sequence[YouTubeAccount],
     channel_metadata: Optional[dict[uuid.UUID, dict]] = None,
+    video_options: Optional[dict] = None,
 ) -> YtUploadJob:
     job = YtUploadJob(
         id=uuid.uuid4(),
@@ -131,6 +137,7 @@ async def create_direct_job(
         made_for_kids=made_for_kids,
         default_language=default_language,
         notify_subscribers=notify_subscribers,
+        **(video_options or {}),
         status=UploadJobStatus.RUNNING.value,
         targets=[
             YtUploadTarget(

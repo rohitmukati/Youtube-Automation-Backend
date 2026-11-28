@@ -158,6 +158,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myvenv
+.myvenv
+myvenv/
 
 # Spyder project settings
 .spyderproject
@@ -220,3 +223,5 @@ __marimo__/
 .streamlit/secrets.toml
 .zip/
 .zip
+tests/
+tests

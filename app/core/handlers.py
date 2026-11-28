@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.config import settings
 from app.core.exceptions import AppException, ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -75,11 +76,15 @@ async def handle_database_error(request: Request, exc: SQLAlchemyError) -> JSONR
 
 
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    request_id = request.scope.get("request_id")
+    logger.exception(
+        "Unhandled error on %s %s (request %s)", request.method, request.url.path, request_id
+    )
     return build_error_response(
         500,
         "internal_error",
         "Something went wrong on our side. Please try again later.",
+        headers={settings.request_id_header: request_id} if request_id else None,
     )
 
 

@@ -56,6 +56,7 @@ from app.utils.yt_channel_management import (
     UploadJobStatus,
     UploadTargetStatus,
     ThumbnailStatus,
+    body_options_from_job,
     build_video_body,
     classify_error,
     watch_url,
@@ -80,6 +81,17 @@ def _channel_metadata_map(payload) -> dict[uuid.UUID, dict]:
             "tags": list(item.tags or []),
         }
         for item in payload.channel_metadata
+    }
+
+
+def _video_options(payload) -> dict:
+    """Optional video settings from the request. None means "not chosen"."""
+    return {
+        "default_audio_language": payload.default_audio_language,
+        "contains_synthetic_media": payload.contains_synthetic_media,
+        "license": payload.license.value if payload.license is not None else None,
+        "embeddable": payload.embeddable,
+        "public_stats_viewable": payload.public_stats_viewable,
     }
 
 
@@ -150,6 +162,11 @@ def _to_detail(
         made_for_kids=job.made_for_kids,
         default_language=job.default_language,
         notify_subscribers=job.notify_subscribers,
+        default_audio_language=job.default_audio_language,
+        contains_synthetic_media=job.contains_synthetic_media,
+        license=job.license,
+        embeddable=job.embeddable,
+        public_stats_viewable=job.public_stats_viewable,
         source_content_type=job.source_content_type,
         thumbnail_file_id=job.thumbnail_file_id,
         thumbnail_file_name=job.thumbnail_file_name,
@@ -204,6 +221,7 @@ class YtChannelManagementService:
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
                 channel_metadata=_channel_metadata_map(payload),
                 parallel_upload_limit=parallel_upload_limit,
+                video_options=_video_options(payload),
             )
             await self._session.commit()
         except IntegrityError:
@@ -383,6 +401,7 @@ class YtChannelManagementService:
                 parallel_upload_limit=parallel_upload_limit,
                 accounts=[accounts[account_id] for account_id in payload.account_ids],
                 channel_metadata=_channel_metadata_map(payload),
+                video_options=_video_options(payload),
             )
             await self._session.commit()
 
@@ -401,6 +420,7 @@ class YtChannelManagementService:
                     publish_at=job.publish_at,
                     made_for_kids=job.made_for_kids,
                     default_language=job.default_language,
+                    **body_options_from_job(job),
                 )
 
                 credentials = None
@@ -532,7 +552,7 @@ class YtChannelManagementService:
                                 thumb_data = await asyncio.to_thread(
                                     youtube_api.fetch_bytes_sync,
                                     signed_url,
-                                    max_bytes=settings.yt_thumbnail_max_bytes,
+                                    max_bytes=settings.storage_image_max_bytes,
                                     timeout=settings.yt_upload_http_timeout_seconds,
                                 )
                                 await asyncio.to_thread(
